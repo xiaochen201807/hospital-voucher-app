@@ -572,6 +572,14 @@ pub fn generate_outbound_voucher(
 mod tests {
     use super::*;
 
+    fn project_file(name: &str) -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    }
+
     fn ledger_entry(drug_name: &str, spec: &str) -> LedgerEntry {
         LedgerEntry {
             code: "1201_TEST".to_string(),
@@ -621,11 +629,14 @@ mod tests {
             std::process::id()
         ));
         let output_string = output.to_string_lossy().to_string();
+        let sales_path = project_file("2026.8月西药销售表_已汇总.xlsx");
+        let ledger_path = project_file("石家庄心理医院_数量金额总账_20260903150759.xlsx");
+        let template_path = project_file("凭证导入模板.xlsx");
 
         let result = generate_outbound_voucher(
-            "../../2026.8月西药销售表_已汇总.xlsx",
-            "../../石家庄心理医院_数量金额总账_20260907173619.xlsx",
-            "../../凭证导入模板.xlsx",
+            &sales_path,
+            &ledger_path,
+            &template_path,
             Some(&output_string),
             None,
             true,
