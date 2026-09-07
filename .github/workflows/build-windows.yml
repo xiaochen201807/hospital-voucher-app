@@ -1,4 +1,4 @@
-name: Build Windows Application (Pure Rust)
+name: Build Cross-Platform Application (Windows & macOS ARM)
 
 on:
   push:
@@ -10,8 +10,21 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    name: Build on ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            target: x86_64-pc-windows-msvc
+            platform: windows
+          - os: macos-latest
+            arch: aarch64
+            target: aarch64-apple-darwin
+            platform: macos
 
     steps:
       - name: Checkout repository
@@ -27,7 +40,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -38,58 +51,81 @@ jobs:
         working-directory: desktop_app
         run: npm install
 
-      - name: Build Pure Rust Tauri Windows App
+      - name: Build Pure Rust Tauri App
         working-directory: desktop_app
         run: npx tauri build
 
-      - name: Gather Artifacts
+      - name: Gather Windows Artifacts
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist_artifacts"
-          
-          # 1. 收集 NSIS Windows 安装程序
           Get-ChildItem -Path "desktop_app/src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName -Destination "dist_artifacts/"
             Write-Host "Found NSIS Setup: $($_.Name)" -ForegroundColor Green
           }
-
-          # 2. 收集纯原生绿色便携免安装版 (仅单个轻量 exe，无任何 Python 运行时依赖)
           if (Test-Path "desktop_app/src-tauri/target/release/desktop_app.exe") {
-            New-Item -ItemType Directory -Force -Path "dist_artifacts/hospital_voucher_pure_rust_portable"
-            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/hospital_voucher_pure_rust_portable/石家庄心理医院财务进销存工作台.exe"
+            New-Item -ItemType Directory -Force -Path "dist_artifacts/hospital_voucher_portable"
+            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/hospital_voucher_portable/石家庄心理医院财务进销存工作台.exe"
             if (Test-Path "factory_mapping.json") {
-              Copy-Item "factory_mapping.json" -Destination "dist_artifacts/hospital_voucher_pure_rust_portable/"
+              Copy-Item "factory_mapping.json" -Destination "dist_artifacts/hospital_voucher_portable/"
             }
-            Compress-Archive -Path "dist_artifacts/hospital_voucher_pure_rust_portable/*" -DestinationPath "dist_artifacts/医院财务凭证工作台_纯原生绿色便携版_x64.zip" -Force
+            Compress-Archive -Path "dist_artifacts/hospital_voucher_portable/*" -DestinationPath "dist_artifacts/医院财务凭证工作台_Windows_便携免安装版_x64.zip" -Force
             Write-Host "Created Portable Pure Rust Zip package!" -ForegroundColor Green
           }
+
+      - name: Gather macOS Artifacts
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p dist_artifacts
+          # 收集 DMG 安装镜像
+          find desktop_app/src-tauri/target/release/bundle/dmg -name "*.dmg" -exec cp {} dist_artifacts/ \; || true
+          # 收集 .app 并打包压缩为 tar.gz
+          if [ -d "desktop_app/src-tauri/target/release/bundle/macos/医院财务凭证自动化系统.app" ]; then
+            tar -czf "dist_artifacts/医院财务凭证自动化系统_macOS_arm64.app.tar.gz" -C "desktop_app/src-tauri/target/release/bundle/macos" "医院财务凭证自动化系统.app"
+          fi
+          ls -la dist_artifacts
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-pure-rust-app
+          name: hospital-voucher-app-${{ matrix.platform }}-${{ matrix.arch }}
           path: dist_artifacts/*
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+          merge-multiple: true
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
-          name: "石家庄心理医院财务进销存工作台 v1.0.0 (纯原生 Rust 版)"
+          name: "石家庄心理医院财务进销存工作台 v1.0.0 (纯原生跨平台版)"
           draft: false
           prerelease: false
           body: |
-            ## 医院财务凭证与进销存自动化工作台 (v1.0.0 纯原生 Rust 架构版)
+            ## 医院财务凭证与进销存自动化工作台 (v1.0.0 纯原生 Rust 跨平台版)
             
             ### 核心亮点：
-            - 🚀 **100% 纯原生 Rust 重写**：彻底移除 Python 依赖，安装包仅约 10MB，秒开极速运行！
+            - 🚀 **100% 纯原生 Rust 跨平台架构**：彻底移除 Python 依赖，安装包仅约 10MB，秒开极速运行！
+            - 💻 **全平台原生支持**：同时提供 Windows (x64) 与 macOS (Apple Silicon M1/M2/M3/M4 ARM) 纯原生安装镜像与便携包。
             - 📋 **账实库存多库智能核对**：月末自动比对财务数量金额总账与西药房、中药房、耗材库库存，自动生成三页审计分析报告。
             - 📥 **药房入库双向审计**：西药/中药入库凭证自动借贷天平平衡校验，自动归集 22 家供应商应付账款。
             - 📤 **销售汇总与出库凭证**：多笔处方智能去重加权，科目自动关联与厂家感知防串户。
-            - 📦 **双版本提供**：提供标准 Windows 安装程序（NSIS .exe）与解压即用绿色便携包（.zip）。
+            - 📦 **开箱即用**：Windows 提供 `.exe` 安装程序与免安装绿色包；macOS 提供 `.dmg` 安装镜像与 `.tar.gz` 应用包。
           files: |
-            dist_artifacts/*.exe
-            dist_artifacts/*.zip
+            all_artifacts/*.exe
+            all_artifacts/*.zip
+            all_artifacts/*.dmg
+            all_artifacts/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
