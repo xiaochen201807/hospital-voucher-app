@@ -25,6 +25,7 @@ struct ScanResultData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct ScanResponse {
     success: bool,
     data: Option<ScanResultData>,
@@ -313,8 +314,9 @@ mod tests {
         let (cfg, _) = core::config::load_config(None);
         let sales_res = core::sales::process_sales_file("../../2026.8月西药销售表.xls", None, None);
         if let Ok(res) = sales_res {
-            assert_eq!(res.unique_drugs_count, 54);
-            println!(">>> 纯 Rust 销售汇总成功: {} 种药品, 总件数: {}", res.unique_drugs_count, res.total_qty);
+            assert_eq!(res.totals.unique_count, 54);
+            assert_eq!(res.totals.original_count, 82);
+            println!(">>> 纯 Rust 销售汇总成功: {} 种去重药品 (原 {} 笔), 总件数: {}", res.totals.unique_count, res.totals.original_count, res.totals.total_qty);
         }
 
         let audit_res = core::audit::run_inventory_audit(

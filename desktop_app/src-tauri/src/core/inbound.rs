@@ -45,6 +45,7 @@ struct InboundItem {
     qty: f64,
     price: f64,
     amount: f64,
+    #[allow(dead_code)]
     unit: String,
 }
 
@@ -345,11 +346,15 @@ pub fn generate_inbound_voucher(
             };
             unmatched_items.push(UnmatchedDrug {
                 name: it.name.clone(),
+                target_name: it.name.clone(),
                 spec: it.spec.clone(),
                 factory: it.factory.clone(),
+                supplier: it.supplier.clone(),
                 qty: it.qty,
                 price: it.price,
+                in_price: it.price,
                 amount: it.amount,
+                in_amt: it.amount,
                 reason,
             });
             String::new()

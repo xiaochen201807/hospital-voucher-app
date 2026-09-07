@@ -349,7 +349,8 @@ function initTabSales() {
       const res = await invoke('execute_sales_process', {
         file,
         output,
-        sheetName
+        sheetName,
+        sheet_name: sheetName
       });
 
       hideLoading();
@@ -385,7 +386,13 @@ function renderSalesResult(data) {
   const resultBox = document.getElementById('sales-result');
   resultBox.classList.remove('hidden');
 
-  const totals = data.totals || {};
+  const totals = data.totals || {
+    original_count: data.total_raw_rows,
+    unique_count: data.unique_drugs_count,
+    total_qty: data.total_qty,
+    total_in_amt: data.total_cost_amt,
+    total_retail_amt: data.total_retail_amt
+  };
   document.getElementById('stat-sales-orig').textContent = totals.original_count?.toLocaleString() || '-';
   document.getElementById('stat-sales-unique').textContent = totals.unique_count?.toLocaleString() || '-';
   document.getElementById('stat-sales-qty').textContent = totals.total_qty?.toLocaleString() || '-';

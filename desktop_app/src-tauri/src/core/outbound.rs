@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UnmatchedDrug {
     pub name: String,
+    pub target_name: String,
     pub spec: String,
     pub factory: String,
+    pub supplier: String,
     pub qty: f64,
     pub price: f64,
+    pub in_price: f64,
     pub amount: f64,
+    pub in_amt: f64,
     pub reason: String,
 }
 
@@ -341,13 +345,18 @@ pub fn generate_outbound_voucher(
             } else {
                 format!("总账中未检索到匹配的存货科目编码")
             };
+            let amt = (qty * raw_price * 100.0).round() / 100.0;
             unmatched_items.push(UnmatchedDrug {
                 name: name.clone(),
+                target_name: name.clone(),
                 spec: spec.clone(),
                 factory: factory.clone(),
+                supplier: factory.clone(),
                 qty,
                 price: raw_price,
-                amount: (qty * raw_price * 100.0).round() / 100.0,
+                in_price: raw_price,
+                amount: amt,
+                in_amt: amt,
                 reason,
             });
             let p = if fallback_price { raw_price } else { 0.0 };

@@ -6,6 +6,10 @@ on:
     tags: [ "v*" ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -51,9 +55,15 @@ jobs:
         working-directory: desktop_app
         run: npm install
 
-      - name: Build Pure Rust Tauri App
+      - name: Build Pure Rust Tauri App (Windows)
+        if: matrix.platform == 'windows'
         working-directory: desktop_app
-        run: npx tauri build
+        run: npx tauri build --bundles nsis
+
+      - name: Build Pure Rust Tauri App (macOS)
+        if: matrix.platform == 'macos'
+        working-directory: desktop_app
+        run: npx tauri build --bundles dmg,app
 
       - name: Gather Windows Artifacts
         if: matrix.platform == 'windows'

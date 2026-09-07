@@ -1,4 +1,4 @@
-use calamine::{open_workbook_auto, Data, Reader, Sheets};
+use calamine::{open_workbook_auto, Data, Sheets};
 use std::path::Path;
 
 /// 从单元格数据转换为纯字符串（去除首尾空白）
