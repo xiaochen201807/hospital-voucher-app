@@ -71,17 +71,24 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist_artifacts"
-          Get-ChildItem -Path "desktop_app/src-tauri/target/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName -Destination "dist_artifacts/"
-            Write-Host "Found MSI: $($_.Name)"
-          }
+          
+          # 1. 收集 NSIS Windows 安装程序
           Get-ChildItem -Path "desktop_app/src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName -Destination "dist_artifacts/"
-            Write-Host "Found NSIS Setup: $($_.Name)"
+            Write-Host "Found NSIS Setup: $($_.Name)" -ForegroundColor Green
           }
+
+          # 2. 打包绿色便携免安装版 (包含主程序与内置 Python Sidecar runner.exe)
           if (Test-Path "desktop_app/src-tauri/target/release/desktop_app.exe") {
-            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/医院财务凭证自动化工作台.exe"
-            Write-Host "Found Portable EXE"
+            New-Item -ItemType Directory -Force -Path "dist_artifacts/portable"
+            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/portable/医院财务凭证自动化系统.exe"
+            New-Item -ItemType Directory -Force -Path "dist_artifacts/portable/resources"
+            if (Test-Path "desktop_app/src-tauri/resources/runner.exe") {
+              Copy-Item "desktop_app/src-tauri/resources/runner.exe" -Destination "dist_artifacts/portable/resources/runner.exe"
+            }
+            Compress-Archive -Path "dist_artifacts/portable/*" -DestinationPath "dist_artifacts/医院财务凭证自动化系统_免安装绿色版.zip" -Force
+            Remove-Item -Recurse -Force "dist_artifacts/portable"
+            Write-Host "Created Portable ZIP bundle!" -ForegroundColor Green
           }
 
       - name: Upload Windows Artifacts
