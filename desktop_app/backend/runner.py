@@ -22,6 +22,16 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+# 显式导入 Excel 处理库，确保 PyInstaller 单文件打包能自动分析收集
+try:
+    import openpyxl
+    import xlrd
+    import xlwt
+    import xlutils
+    import xlutils.copy
+except ImportError:
+    pass
+
 try:
     import process_sales
     import generate_voucher

@@ -17,6 +17,15 @@ import sys
 import argparse
 from collections import OrderedDict
 
+try:
+    import xlrd
+    import xlwt
+    from xlutils.copy import copy as xl_copy
+except ImportError:
+    xlrd = None
+    xlwt = None
+    xl_copy = None
+
 # 默认列定义
 GROUP_KEYS = ['药品名称', '规格', '剂型', '制药厂']
 TARGET_HEADERS = ['药品名称', '规格', '剂型', '制药厂', '单位', '数量', '进价金额', '零价金额', '库存']
@@ -250,8 +259,15 @@ def build_xls_styles():
 
 def process_xls_file(file_path, output_path=None, sheet_name=None):
     """处理 .xls 格式文件"""
-    import xlrd
-    from xlutils.copy import copy
+    global xlrd, xl_copy
+    if xlrd is None or xl_copy is None:
+        try:
+            import xlrd as _xlrd
+            from xlutils.copy import copy as _xl_copy
+            xlrd = _xlrd
+            xl_copy = _xl_copy
+        except ImportError:
+            raise ImportError("处理旧版 .xls 文件需要 xlrd 与 xlutils 模块，请先执行: pip install xlrd xlwt xlutils")
 
     rb = xlrd.open_workbook(file_path, formatting_info=True)
     s0 = rb.sheet_by_index(0)
@@ -265,7 +281,7 @@ def process_xls_file(file_path, output_path=None, sheet_name=None):
     sorted_records, totals = process_sales_data(rows)
 
     # 复制工作簿以保留第一个Sheet
-    wb = copy(rb)
+    wb = xl_copy(rb)
 
     # 确定第二个Sheet的名称
     if sheet_name:
