@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>石家庄心理医院 - 财务凭证与进销存自动化工作台</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div id="app" class="app-layout">
+      <!-- 顶部全局导航栏 -->
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-logo">
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none">
+              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1 class="brand-title">石家庄心理医院</h1>
+            <span class="brand-subtitle">财务凭证与进销存自动化工作台</span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button id="btn-quick-scan" class="btn btn-secondary btn-sm" title="扫描当前目录下的所有 Excel 候选文件">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+              <path d="M21 21l-4.35-4.35" />
+              <circle cx="11" cy="11" r="8" />
+            </svg>
+            <span>一键识别工作区文件</span>
+          </button>
+
+          <button id="btn-help-modal" class="btn btn-outline btn-sm" title="查看业务处理逻辑、凭证匹配优先级与新药建档指南">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span>业务规则与使用帮助</span>
+          </button>
+
+          <div class="system-status">
+            <span class="status-dot"></span>
+            <span class="status-label">就绪</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- 主工作区：左侧选项卡 + 右侧工作面板 -->
+      <div class="workspace-body">
+        <!-- 侧边导航选项卡 -->
+        <nav class="sidebar-nav">
+          <button class="nav-tab active" data-tab="tab-sales">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18M9 21V9" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">销售明细汇总</div>
+              <div class="nav-desc">多行去重与数量金额汇总</div>
+            </div>
+          </button>
+
+          <button class="nav-tab" data-tab="tab-outbound">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">销售出库凭证</div>
+              <div class="nav-desc">自动关联总账存货编码</div>
+            </div>
+          </button>
+
+          <button class="nav-tab" data-tab="tab-inbound">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <path d="M12 2v14M18 10l-6 6-6-6" />
+                <rect x="3" y="16" width="18" height="6" rx="2" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">药房入库凭证</div>
+              <div class="nav-desc">西药/中药借贷双向审计</div>
+            </div>
+          </button>
+
+          <button class="nav-tab" data-tab="tab-config">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">厂家与字典配置</div>
+              <div class="nav-desc">映射规则与新药细分名单</div>
+            </div>
+          </button>
+        </nav>
+
+        <!-- 右侧主要内容区 -->
+        <main class="content-area">
+          <!-- 候选文件扫描提示卡片 -->
+          <div id="scan-banner" class="scan-banner hidden">
+            <div class="banner-title">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="16" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+              <span>在工作区已为您自动识别到以下文件：</span>
+            </div>
+            <div id="scan-quick-links" class="scan-quick-links"></div>
+          </div>
+
+          <!-- TAB 1: 销售明细汇总 -->
+          <section id="tab-sales" class="tab-panel active">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">销售明细汇总处理</h2>
+                <p class="panel-desc">支持门诊与住院销售汇总表（.xls / .xlsx），自动合并相同药品多笔销售、汇总实发数量、重算进价及零售总额。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>原始销售明细表</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="sales-input-file" class="form-input" placeholder="请选择或拖拽销售明细 Excel 文件..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-sales">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group col-6">
+                    <label class="form-label">Sheet 标签名称</label>
+                    <input type="text" id="sales-sheet-name" class="form-input" value="销售明细" placeholder="例如: 销售明细 或 Sheet1" />
+                  </div>
+                  <div class="form-group col-6">
+                    <label class="form-label">生成文件名（可选）</label>
+                    <input type="text" id="sales-output-name" class="form-input" placeholder="默认: [原名]_已汇总.xlsx" />
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-sales" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    <span>开始执行汇总去重</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 销售汇总结果显示卡片 -->
+            <div id="sales-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>销售汇总完成</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-sales-file" class="btn btn-secondary btn-sm">打开 Excel 文件</button>
+                  <button id="btn-show-sales-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-sales-orig">-</div>
+                  <div class="stat-label">原始数据行数</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-sales-unique">-</div>
+                  <div class="stat-label">汇总后品种数</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-sales-qty">-</div>
+                  <div class="stat-label">销售总数量</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-sales-in-amt">-</div>
+                  <div class="stat-label">进价总金额 (元)</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-sales-retail-amt">-</div>
+                  <div class="stat-label">零售总金额 (元)</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 2: 销售出库凭证生成 -->
+          <section id="tab-outbound" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">销售出库凭证生成</h2>
+                <p class="panel-desc">读取销售汇总数据，精准匹配数量金额总账中存货科目的厂家、规格与单价，自动生成符合金蝶/用友导入规范的出库凭证。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>1. 销售汇总表 (Excel)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="outbound-sales-file" class="form-input" placeholder="请选择已汇总的销售 Excel 表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-outbound-sales">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 数量金额总账表 (Excel)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="outbound-ledger-file" class="form-input" placeholder="请选择医院数量金额总账表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-outbound-ledger">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 凭证导入模板 (Excel)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="outbound-template-file" class="form-input" placeholder="请选择凭证导入模板文件..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-outbound-template">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group col-6">
+                    <label class="form-label">凭证记账日期（留空则自动取销售与总账月末）</label>
+                    <input type="date" id="outbound-date" class="form-input" />
+                  </div>
+                  <div class="form-group col-6 checkbox-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="outbound-fallback-price" checked />
+                      <span>未在总账中查到单价时，回退使用销售表历史进价</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-outbound" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span>一键生成出库凭证</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 出库凭证结果显示卡片 -->
+            <div id="outbound-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>销售出库凭证生成成功</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-outbound-file" class="btn btn-secondary btn-sm">打开凭证 Excel</button>
+                  <button id="btn-show-outbound-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-outbound-total">-</div>
+                  <div class="stat-label">总销售品种数</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-outbound-rate">-</div>
+                  <div class="stat-label">科目匹配率</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-outbound-matched">-</div>
+                  <div class="stat-label">精准匹配行数</div>
+                </div>
+                <div class="stat-card warning">
+                  <div class="stat-val" id="stat-outbound-unmatched">-</div>
+                  <div class="stat-label">未匹配新药品</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-outbound-amt">-</div>
+                  <div class="stat-label">贷方出库总额 (元)</div>
+                </div>
+              </div>
+
+              <!-- 未匹配新药表格 -->
+              <div id="outbound-unmatched-box" class="unmatched-box hidden">
+                <div class="unmatched-header">
+                  <div class="unmatched-title">
+                    <span class="badge badge-warning">安全告警</span>
+                    <span>发现 <strong id="outbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户，请核实）：</span>
+                  </div>
+                  <div class="unmatched-actions">
+                    <button id="btn-copy-outbound-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
+                      📋 复制清单
+                    </button>
+                    <button id="btn-export-outbound-unmatched" class="btn btn-secondary btn-xs" title="导出未匹配药品清单为 CSV 表格">
+                      📥 导出未建档名单
+                    </button>
+                  </div>
+                </div>
+                <div class="table-container">
+                  <table class="data-table" id="outbound-unmatched-table">
+                    <thead>
+                      <tr>
+                        <th>药品名称</th>
+                        <th>规格</th>
+                        <th>生产厂家</th>
+                        <th>出库数量</th>
+                        <th>进价</th>
+                        <th>未匹配原因诊断</th>
+                        <th style="text-align: center;">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 3: 药房入库凭证生成 -->
+          <section id="tab-inbound" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">药房入库凭证生成</h2>
+                <p class="panel-desc">支持西药与中药饮片入库单，精准匹配供应商往来科目，智能校验借贷总额平衡性（借方库存商品 = 贷方应付账款）。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>1. 药品入库单 (Excel，西药或中药)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="inbound-file" class="form-input" placeholder="请选择药品入库单文件..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-inbound">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 数量金额总账表 (Excel)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="inbound-ledger-file" class="form-input" placeholder="请选择医院数量金额总账表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-inbound-ledger">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 凭证导入模板 (Excel)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="inbound-template-file" class="form-input" placeholder="请选择凭证导入模板文件..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-inbound-template">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group col-6">
+                    <label class="form-label">凭证字号</label>
+                    <input type="text" id="inbound-voucher-no" class="form-input" value="记" placeholder="例如: 记 或 银" />
+                  </div>
+                  <div class="form-group col-6">
+                    <label class="form-label">记账日期（留空则自动取入库单最大日期）</label>
+                    <input type="date" id="inbound-date" class="form-input" />
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-inbound" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="12" y1="18" x2="12" y2="12" />
+                      <line x1="9" y1="15" x2="15" y2="15" />
+                    </svg>
+                    <span>一键生成药房入库凭证</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 入库凭证结果显示卡片 -->
+            <div id="inbound-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>药房入库凭证生成成功</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-inbound-file" class="btn btn-secondary btn-sm">打开凭证 Excel</button>
+                  <button id="btn-show-inbound-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <!-- 借贷平衡核心仪表盘 -->
+              <div class="balance-dashboard">
+                <div class="balance-card debit">
+                  <div class="balance-side">借方合计 (入库药品存货)</div>
+                  <div class="balance-amount" id="audit-debit-amt">¥ 0.00</div>
+                  <div class="balance-detail" id="audit-debit-desc">共 0 笔明细</div>
+                </div>
+
+                <div class="balance-indicator balanced" id="balance-indicator-box">
+                  <div class="indicator-icon">⚖</div>
+                  <div class="indicator-status" id="balance-status-text">借贷完美平衡</div>
+                  <div class="indicator-diff" id="balance-diff-text">差额: ¥ 0.00</div>
+                </div>
+
+                <div class="balance-card credit">
+                  <div class="balance-side">贷方合计 (应付账款供应商)</div>
+                  <div class="balance-amount" id="audit-credit-amt">¥ 0.00</div>
+                  <div class="balance-detail" id="audit-credit-desc">共 0 家供应商</div>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-inbound-items">-</div>
+                  <div class="stat-label">入库药品品规数</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-inbound-rate">-</div>
+                  <div class="stat-label">存货编码匹配率</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-inbound-matched">-</div>
+                  <div class="stat-label">成功匹配行数</div>
+                </div>
+                <div class="stat-card warning">
+                  <div class="stat-val" id="stat-inbound-unmatched">-</div>
+                  <div class="stat-label">待补录新药</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-inbound-entries">-</div>
+                  <div class="stat-label">生成凭证总分录数</div>
+                </div>
+              </div>
+
+              <!-- 供应商入库汇总表 -->
+              <div class="supplier-summary-box">
+                <div class="box-title">各供应商入库金额汇总明细</div>
+                <div class="table-container">
+                  <table class="data-table" id="inbound-supplier-table">
+                    <thead>
+                      <tr>
+                        <th>供应商名称</th>
+                        <th>辅助核算编码</th>
+                        <th>简称</th>
+                        <th>入库药品条数</th>
+                        <th>应付入账金额</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- 未匹配新药提醒 -->
+              <div id="inbound-unmatched-box" class="unmatched-box hidden">
+                <div class="unmatched-header">
+                  <div class="unmatched-title">
+                    <span class="badge badge-warning">安全告警</span>
+                    <span>发现 <strong id="inbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户，请核实）：</span>
+                  </div>
+                  <div class="unmatched-actions">
+                    <button id="btn-copy-inbound-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
+                      📋 复制清单
+                    </button>
+                    <button id="btn-export-inbound-unmatched" class="btn btn-secondary btn-xs" title="导出未匹配药品清单为 CSV 表格">
+                      📥 导出未建档名单
+                    </button>
+                  </div>
+                </div>
+                <div class="table-container">
+                  <table class="data-table" id="inbound-unmatched-table">
+                    <thead>
+                      <tr>
+                        <th>供应商</th>
+                        <th>药品名称</th>
+                        <th>规格</th>
+                        <th>数量</th>
+                        <th>进价</th>
+                        <th>入库金额</th>
+                        <th>未匹配原因诊断</th>
+                        <th style="text-align: center;">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 4: 厂家与字典配置 -->
+          <section id="tab-config" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">厂家全名与简写映射规则配置</h2>
+                <p class="panel-desc">系统基于此配置将进销存单据中的各厂家全称映射为总账标准的 2~4 字规范简称（如“河北蕴德药业有限公” -> “蕴德”），并精准匹配多厂家药品（如“海螵蛸”、“鸡血藤”）。修改后即时保存生效。</p>
+              </div>
+              <div class="panel-actions">
+                <button id="btn-reload-config" class="btn btn-secondary btn-sm">重新加载</button>
+                <button id="btn-save-config" class="btn btn-primary btn-sm">保存当前配置</button>
+              </div>
+            </div>
+
+            <div class="config-sections">
+              <!-- 厂家全称映射表 -->
+              <div class="config-card">
+                <div class="config-card-header">
+                  <div class="config-card-title">
+                    <span>1. 生产厂家全称 ➔ 规范简称对照表</span>
+                    <span class="count-pill" id="vendor-count-pill">0 家</span>
+                  </div>
+                  <button id="btn-add-vendor-row" class="btn btn-outline btn-xs">+ 添加厂家映射</button>
+                </div>
+                <div class="table-container vendor-table-wrapper">
+                  <table class="data-table" id="vendor-mapping-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 55%;">厂家完整名称 (单据中出现的名称)</th>
+                        <th style="width: 30%;">规范简称 (总账括号内简称)</th>
+                        <th style="width: 15%; text-align: center;">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="config-card-grid">
+                <!-- 严格厂家后缀锁定药品名单 -->
+                <div class="config-card">
+                  <div class="config-card-header">
+                    <div class="config-card-title">
+                      <span>2. 严格厂家后缀细分药品</span>
+                      <span class="badge badge-info">防串户</span>
+                    </div>
+                  </div>
+                  <p class="config-tip">此类药品入库或销售时，禁止回退匹配不带厂家的通用历史科目，必须全词匹配对应厂家简称（例如：海螵蛸）。</p>
+                  <div id="strict-drugs-tags" class="tags-container"></div>
+                  <div class="tag-input-row">
+                    <input type="text" id="strict-drug-input" class="form-input input-sm" placeholder="输入药品名..." />
+                    <button id="btn-add-strict-drug" class="btn btn-secondary btn-sm">添加</button>
+                  </div>
+                </div>
+
+                <!-- 特殊存货编码覆盖映射 -->
+                <div class="config-card">
+                  <div class="config-card-header">
+                    <div class="config-card-title">
+                      <span>3. 特殊药品编码指定覆盖</span>
+                      <span class="badge badge-info">覆盖规则</span>
+                    </div>
+                  </div>
+                  <p class="config-tip">为指定药品直接强行绑定存货编码（留空 "" 表示新药未建档时安全置空并告警）。</p>
+                  <div class="table-container">
+                    <table class="data-table" id="overrides-table">
+                      <thead>
+                        <tr>
+                          <th>药品完整目标名</th>
+                          <th>指定存货编码</th>
+                          <th style="text-align: center;">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                  <div class="tag-input-row" style="margin-top: 8px;">
+                    <input type="text" id="override-key-input" class="form-input input-sm" placeholder="如: 海螵蛸（蕴德）" />
+                    <input type="text" id="override-val-input" class="form-input input-sm" placeholder="如: 1201_ZY9999 或留空" />
+                    <button id="btn-add-override" class="btn btn-secondary btn-sm">添加</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <!-- 业务规则与使用帮助模态弹窗 (Modal) -->
+      <div id="help-modal" class="modal-overlay hidden">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <div class="modal-title">
+              <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <span>财务凭证自动化系统 - 业务规则与匹配指南</span>
+            </div>
+            <button id="btn-close-help" class="modal-close" title="关闭">×</button>
+          </div>
+
+          <div class="modal-body">
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">1</span>
+                <span>销售明细去重汇总规则 (process_sales)</span>
+              </h3>
+              <p class="help-text">
+                医院门诊或住院的原始销售明细表通常包含多笔同种药品的处方销售。系统以<strong>【药品名称 + 规格】</strong>作为唯一品种主键进行自动合并：
+              </p>
+              <ul class="help-list">
+                <li><strong>实发数量</strong>：自动累加各笔处方的实发总件数。</li>
+                <li><strong>销售进价与零售价</strong>：按各笔明细金额与数量重新加权核算，确保汇总行进价金额与零售金额完全准确。</li>
+                <li><strong>输出结构</strong>：自动在原 Excel 或指定路径生成独立的汇总工作表，直接作为下一步出库凭证的数据源。</li>
+              </ul>
+            </div>
+
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">2</span>
+                <span>出库凭证存货科目匹配与优先级法则 (generate_voucher)</span>
+              </h3>
+              <p class="help-text">系统在读取医院【数量金额总账】时，按照严格的防错优先级依次寻址：</p>
+              <ul class="help-list">
+                <li><span class="tag-rule">优先级 1 (最优)</span> <strong>全名 + 厂家全词精准匹配</strong>：当药品带有厂家（例如 <code>鸡血藤（蕴德）</code>），优先匹配总账中带有相同厂家括号简称的存货科目（精准命中 <code>1201_ZY0124</code>，绝不误配国瑞堂）。</li>
+                <li><span class="tag-rule">优先级 2</span> <strong>全名 + 规格一致性匹配</strong>：当无厂家冲突时，匹配药品全名并校验规格一致性。</li>
+                <li><span class="tag-rule">单价取值</span>：优先取总账中该存货科目的最新【结存单价 / 实际成本单价】；若勾选“回退历史进价”，总账无单价时会自动取销售表进价，确保贷方金额不为零。</li>
+              </ul>
+            </div>
+
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">3</span>
+                <span>中药饮片厂家感知与【海螵蛸】防串户机制 (重点保障)</span>
+              </h3>
+              <div class="alert-box">
+                <div class="alert-title">⚠️ 为什么 2026 年 8 月中药入库单中的【海螵蛸】会提示未匹配？</div>
+                <p class="alert-content">
+                  8 月新进的【海螵蛸】由 <strong>河北蕴德药业</strong> 生产，规格为 <code>1克*1000克/袋</code>，单价 <code>0.061元/克</code>。而医院旧总账中仅存历史科目 <code>1201_ZY0106 海螵蛸</code>（单价 0.20元，属于早前其他批次）。<br />
+                  若采用普通模糊匹配，会导致新药严重串户至历史高单价科目，造成账实不符与存货错账。因此系统实施<strong>严格厂家锁定</strong>：将其识别为 <code>海螵蛸（蕴德）</code>，并强制禁止回退到 <code>ZY0106</code>，在凭证中安全置空编码并高亮提示财务人员！
+                </p>
+              </div>
+            </div>
+
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">4</span>
+                <span>药房入库凭证借贷平衡双向审计机制 (generate_inbound_voucher)</span>
+              </h3>
+              <ul class="help-list">
+                <li><strong>借方分录（入库药品）</strong>：借记【库存商品】（西药）或【中药饮片】（中药），按单据中的各药品品规分别生成明细行，辅助核算挂对应存货编码。</li>
+                <li><strong>贷方分录（应付供应商）</strong>：贷记【应付账款】，按单据中涉及的各供应商自动归集合计，从 22 家供应商往来字典中自动匹配辅助核算编码（如华润益生 <code>002</code>、河北国泰 <code>004</code>、河北蕴德 <code>005</code>），并生成规范摘要（如 <code>河北蕴德到货</code>）。</li>
+                <li><strong>双向天平审计</strong>：界面仪表盘自动核算 <code>∑借方各药品金额</code> 与 <code>∑贷方各供应商应付款</code>，差额为 0.00 时指示灯亮起绿色“借贷完美平衡”。</li>
+              </ul>
+            </div>
+
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">5</span>
+                <span>未匹配新药品出现时，财务操作指南</span>
+              </h3>
+              <ol class="help-list numbered">
+                <li><strong>查看告警表格</strong>：在结果卡片下方的未匹配表格中，可清楚查看药品名称、厂家、规格、出入库数量及未匹配原因诊断。</li>
+                <li><strong>导出或复制清单</strong>：点击【📋 复制清单】或【📥 导出未建档名单】，一键交由药库或在财务软件（金蝶/用友）中快速建档。</li>
+                <li><strong>补填存货编码</strong>：
+                  <ul>
+                    <li>方式 A：在生成的 Excel 凭证导入表中，直接在该行“存货代码”列补填刚建好的编码即可导入。</li>
+                    <li>方式 B：切换至软件第 4 个 Tab【厂家与字典配置】，在“特殊药品编码指定覆盖”中添加该药品（如 <code>海螵蛸（蕴德）: 1201_ZY0259</code>）并保存，以后再次运行将全自动匹配！</li>
+                  </ul>
+                </li>
+              </ol>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button id="btn-modal-ok" class="btn btn-primary">我已了解</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 全局轻量通知提示 (Toast) -->
+      <div id="toast-container" class="toast-container"></div>
+
+      <!-- 全局处理中 Loading 模态框 -->
+      <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="loading-box">
+          <div class="spinner"></div>
+          <div class="loading-text" id="loading-msg">正在处理中，请稍候...</div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+

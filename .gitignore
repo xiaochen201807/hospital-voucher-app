@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+build/
+dist/
+dist_artifacts/
+*.egg-info/
+
+# Compiled executables
+*.exe
+*.msi
+*.dmg
+desktop_app/src-tauri/resources/*.exe
+desktop_app/backend/*.exe
+
+# Excel temp files
+~$*.xlsx
+~$*.xls
+
+# Generated output files (test runs)
+*已生成*.xlsx
+
+# System files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

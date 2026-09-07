@@ -1,0 +1,10 @@
+# Excel 97-2004 (.xls) 支持
+xlrd>=2.0.1
+xlwt>=1.3.0
+xlutils>=2.0.0
+
+# 现代 Excel (.xlsx) 支持
+openpyxl>=3.1.2
+
+# 数据处理支持（可选）
+pandas>=2.0.0
