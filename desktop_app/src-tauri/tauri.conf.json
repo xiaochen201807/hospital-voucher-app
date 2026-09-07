@@ -27,9 +27,7 @@
     "targets": [
       "nsis"
     ],
-    "resources": [
-      "resources/**/*"
-    ],
+    "resources": [],
     "windows": {
       "nsis": {
         "languages": [

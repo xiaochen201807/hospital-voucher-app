@@ -1,0 +1,482 @@
+use crate::core::config::{clean_text, ConfigData};
+use crate::core::excel_utils::{cell_as_f64, cell_as_string, find_col_idx, open_excel};
+use crate::core::outbound::{load_ledger_entries, match_drug, UnmatchedDrug};
+use calamine::Reader;
+use rust_xlsxwriter::{Format, FormatBorder, Workbook};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SupplierSummary {
+    pub supplier: String,
+    pub code: String,
+    pub brief: String,
+    pub count: usize,
+    pub amount: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InboundVoucherResult {
+    pub success: bool,
+    pub output_file: String,
+    pub voucher_date: String,
+    pub total_items: usize,
+    pub total_entries: usize,
+    pub matched_count: usize,
+    pub unmatched_count: usize,
+    pub match_rate: f64,
+    pub total_qty: f64,
+    pub total_debit_amt: f64,
+    pub total_credit_amt: f64,
+    pub is_balanced: bool,
+    pub suppliers_summary: Vec<SupplierSummary>,
+    pub unmatched_items: Vec<UnmatchedDrug>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InboundItem {
+    supplier: String,
+    name: String,
+    spec: String,
+    factory: String,
+    qty: f64,
+    price: f64,
+    amount: f64,
+    unit: String,
+}
+
+/// 提取供应商简称摘要，例如 "河北蕴德药业有限公司" -> "河北蕴德到货"
+pub fn get_supplier_brief(sup_name: &str) -> String {
+    if sup_name.is_empty() {
+        return "药品到货".to_string();
+    }
+    let cleaned = sup_name
+        .replace("股份有限公司", "")
+        .replace("医药有限公司", "")
+        .replace("药业有限公司", "")
+        .replace("有限责任公司", "")
+        .replace("有限公司", "")
+        .replace("责任公司", "");
+    format!("{}到货", cleaned.trim())
+}
+
+/// 从凭证模板中提取供应商往来字典 (code -> name)
+pub fn load_supplier_dict(template_path: &Path) -> HashMap<String, String> {
+    let mut dict = HashMap::new();
+    if let Ok(mut wb) = open_excel(template_path) {
+        if let Some(sheet_name) = wb.sheet_names().iter().find(|s| s.contains("辅助核算")) {
+            if let Ok(range) = wb.worksheet_range(sheet_name) {
+                for row in range.rows() {
+                    if row.len() >= 3 {
+                        let cat = cell_as_string(&row[0]);
+                        if cat.contains("供应商") {
+                            let code = cell_as_string(&row[1]);
+                            let name = cell_as_string(&row[2]);
+                            if !code.is_empty() && !name.is_empty() {
+                                dict.insert(code, name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 内置常见兜底
+    if dict.is_empty() {
+        dict.insert("001".into(), "国药乐仁堂医药有限公司".into());
+        dict.insert("002".into(), "华润益生制药有限公司".into());
+        dict.insert("004".into(), "河北国泰医药有限责任公司".into());
+        dict.insert("005".into(), "河北蕴德药业有限公司".into());
+        dict.insert("007".into(), "石药集团中诚医药字号".into());
+    }
+
+    dict
+}
+
+/// 匹配供应商编码
+pub fn match_supplier_code(sup_name: &str, dict: &HashMap<String, String>) -> (String, String) {
+    let clean_sup = clean_text(sup_name);
+
+    // 1. 完全一致匹配
+    for (code, name) in dict {
+        if clean_text(name) == clean_sup {
+            return (code.clone(), name.clone());
+        }
+    }
+
+    // 2. 互相包含比对
+    for (code, name) in dict {
+        let n_clean = clean_text(name);
+        if n_clean.contains(&clean_sup) || clean_sup.contains(&n_clean) {
+            return (code.clone(), name.clone());
+        }
+    }
+
+    // 3. 去除通用后缀比对
+    let core_sup = sup_name
+        .replace("股份有限公司", "")
+        .replace("医药有限公司", "")
+        .replace("药业有限公司", "")
+        .replace("有限责任公司", "")
+        .replace("有限公司", "");
+    let core_clean = clean_text(&core_sup);
+
+    if !core_clean.is_empty() {
+        for (code, name) in dict {
+            if clean_text(name).contains(&core_clean) {
+                return (code.clone(), name.clone());
+            }
+        }
+    }
+
+    (String::new(), sup_name.to_string())
+}
+
+/// 执行生成药房入库凭证
+pub fn generate_inbound_voucher(
+    inbound_path: &str,
+    ledger_path: &str,
+    template_path: &str,
+    custom_output: Option<&str>,
+    target_date_opt: Option<&str>,
+    _voucher_no: Option<&str>,
+    config: &ConfigData,
+) -> Result<InboundVoucherResult, String> {
+    let in_p = Path::new(inbound_path);
+    let ledger_p = Path::new(ledger_path);
+    let tmpl_p = Path::new(template_path);
+
+    if !in_p.exists() {
+        return Err(format!("入库单文件 '{:?}' 不存在", in_p));
+    }
+    if !ledger_p.exists() {
+        return Err(format!("总账文件 '{:?}' 不存在", ledger_p));
+    }
+
+    // 1. 读取总账建立字典
+    let ledger_entries = load_ledger_entries(ledger_p)?;
+
+    // 2. 读取供应商字典
+    let supplier_dict = load_supplier_dict(tmpl_p);
+
+    // 3. 读取入库单明细
+    let mut in_wb = open_excel(in_p)?;
+    let sheet_names = in_wb.sheet_names();
+    let s_name = sheet_names
+        .iter()
+        .find(|s| s.contains("入库") || s.contains("明细"))
+        .unwrap_or(&sheet_names[0]);
+
+    let range = in_wb
+        .worksheet_range(s_name)
+        .map_err(|e| format!("读取入库单失败: {}", e))?;
+
+    let rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
+    if rows.len() < 2 {
+        return Err("入库单中无有效数据".into());
+    }
+
+    let mut h_idx = 0;
+    for (i, r) in rows.iter().take(10).enumerate() {
+        if find_col_idx(r, &["药品名称", "品名", "商品名称"]).is_some() {
+            h_idx = i;
+            break;
+        }
+    }
+
+    let header = &rows[h_idx];
+    let col_name = find_col_idx(header, &["药品名称", "品名", "商品名称"]).unwrap();
+    let col_spec = find_col_idx(header, &["规格"]).unwrap_or(col_name + 1);
+    let col_factory = find_col_idx(header, &["制药厂", "生产厂家", "厂家"]).unwrap_or(col_spec + 1);
+    let col_sup = find_col_idx(header, &["供货单位", "供应商", "单位名称"]).unwrap_or(col_factory + 1);
+    let col_unit = find_col_idx(header, &["单位"]).unwrap_or(col_sup + 1);
+    let col_qty = find_col_idx(header, &["数量", "入库数量"]).unwrap_or(col_unit + 1);
+    let col_price = find_col_idx(header, &["进价", "成本单价", "单价"]).unwrap_or(col_qty + 1);
+    let col_amt = find_col_idx(header, &["金额", "进价金额", "入库金额"]).unwrap_or(col_price + 1);
+
+    let is_tcm = inbound_path.contains("中药");
+    let subject_code_debit = if is_tcm { "1201_ZY" } else { "1201_XY" };
+    let subject_name_debit = if is_tcm { "中药饮片" } else { "库存商品" };
+
+    let voucher_date = target_date_opt
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "2026-08-31".to_string());
+
+    let mut items = Vec::new();
+    let mut total_debit = 0.0;
+    let mut total_qty = 0.0;
+
+    for row in rows.iter().skip(h_idx + 1) {
+        if row.is_empty() {
+            continue;
+        }
+        let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
+        if name.is_empty() || name.contains("合计") || name.contains("总计") {
+            continue;
+        }
+
+        let spec = row.get(col_spec).map(cell_as_string).unwrap_or_default();
+        let factory = row.get(col_factory).map(cell_as_string).unwrap_or_default();
+        let supplier = row.get(col_sup).map(cell_as_string).unwrap_or_default();
+        let unit = row.get(col_unit).map(cell_as_string).unwrap_or_default();
+
+        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
+        let price = row.get(col_price).map(cell_as_f64).unwrap_or(0.0);
+        let mut amt = row.get(col_amt).map(cell_as_f64).unwrap_or(0.0);
+        if amt == 0.0 && qty > 0.0 && price > 0.0 {
+            amt = (qty * price * 100.0).round() / 100.0;
+        }
+
+        total_debit += amt;
+        total_qty += qty;
+
+        items.push(InboundItem {
+            supplier,
+            name,
+            spec,
+            factory,
+            qty,
+            price,
+            amount: amt,
+            unit,
+        });
+    }
+
+    // 供应商汇总 (贷方)
+    let mut sup_group: BTreeMap<String, f64> = BTreeMap::new();
+    for it in &items {
+        *sup_group.entry(it.supplier.clone()).or_insert(0.0) += it.amount;
+    }
+
+    let mut suppliers_summary = Vec::new();
+    let mut total_credit = 0.0;
+
+    for (sup, amt) in &sup_group {
+        let (code, _) = match_supplier_code(sup, &supplier_dict);
+        let brief = get_supplier_brief(sup);
+        let c_amt = (*amt * 100.0).round() / 100.0;
+        total_credit += c_amt;
+        let count = items.iter().filter(|i| &i.supplier == sup).count();
+
+        suppliers_summary.push(SupplierSummary {
+            supplier: sup.clone(),
+            code,
+            brief,
+            count,
+            amount: c_amt,
+        });
+    }
+
+    total_debit = (total_debit * 100.0).round() / 100.0;
+    total_credit = (total_credit * 100.0).round() / 100.0;
+    let is_balanced = (total_debit - total_credit).abs() < 0.01;
+
+    // 4. 生成凭证 Excel
+    let mut out_wb = Workbook::new();
+    let ws = out_wb.add_worksheet();
+    ws.set_name("凭证模版").map_err(|e| e.to_string())?;
+
+    let fmt_header = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
+    let fmt_text = Format::new()
+        .set_font_size(10)
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
+    let fmt_left = Format::new()
+        .set_font_size(10)
+        .set_align(rust_xlsxwriter::FormatAlign::Left)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
+    let fmt_money = Format::new()
+        .set_font_size(10)
+        .set_num_format("#,##0.00")
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
+    let fmt_qty = Format::new()
+        .set_font_size(10)
+        .set_num_format("#,##0.00")
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
+    let template_headers = [
+        "日期", "凭证字", "凭证号", "附件数", "分录序号", "摘要", "科目代码", "科目名称",
+        "借方金额", "贷方金额", "客户", "供应商", "职员", "项目", "部门", "存货",
+        "是否限定", "自定义类别", "自定义编码", "自定义类别1", "自定义编码1", "数量",
+        "单价", "原币金额", "币别", "汇率",
+    ];
+
+    ws.set_row_height(0, 26).map_err(|e| e.to_string())?;
+    for (c, h) in template_headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, *h, &fmt_header)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut row_idx: u32 = 1;
+    let mut seq = 1;
+    let mut matched_count = 0;
+    let mut unmatched_items = Vec::new();
+
+    // 写入借方分录 (入库药品品规)
+    for it in &items {
+        let matched = match_drug(&it.name, &it.spec, &it.factory, &ledger_entries, config);
+        let aux_code = if let Some(m) = matched {
+            matched_count += 1;
+            m.aux_code
+        } else {
+            let reason = if config.strict_vendor_suffix_drugs.iter().any(|d| clean_text(d) == clean_text(&it.name)) {
+                format!("严格锁定厂家药品，总账未查到匹配厂家科目")
+            } else {
+                format!("总账中未查到对应存货编码")
+            };
+            unmatched_items.push(UnmatchedDrug {
+                name: it.name.clone(),
+                spec: it.spec.clone(),
+                factory: it.factory.clone(),
+                qty: it.qty,
+                price: it.price,
+                amount: it.amount,
+                reason,
+            });
+            String::new()
+        };
+
+        ws.set_row_height(row_idx, 20).map_err(|e| e.to_string())?;
+
+        ws.write_string_with_format(row_idx, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 3, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 4, seq as f64, &fmt_text).map_err(|e| e.to_string())?;
+
+        let brief = format!("入库-{}", it.name);
+        ws.write_string_with_format(row_idx, 5, &brief, &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 6, subject_code_debit, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 7, subject_name_debit, &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 8, it.amount, &fmt_money).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 9, &fmt_text).map_err(|e| e.to_string())?;
+
+        for c in 10..15 {
+            ws.write_blank(row_idx, c as u16, &fmt_text).map_err(|e| e.to_string())?;
+        }
+
+        if !aux_code.is_empty() {
+            ws.write_string_with_format(row_idx, 15, &aux_code, &fmt_text).map_err(|e| e.to_string())?;
+        } else {
+            ws.write_blank(row_idx, 15, &fmt_text).map_err(|e| e.to_string())?;
+        }
+
+        for c in 16..21 {
+            ws.write_blank(row_idx, c as u16, &fmt_text).map_err(|e| e.to_string())?;
+        }
+
+        ws.write_number_with_format(row_idx, 21, it.qty, &fmt_qty).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 22, it.price, &fmt_money).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 23, it.amount, &fmt_money).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 24, "RMB", &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 25, 1.0, &fmt_text).map_err(|e| e.to_string())?;
+
+        row_idx += 1;
+        seq += 1;
+    }
+
+    // 写入贷方分录 (按供应商汇总应付账款)
+    for sup in &suppliers_summary {
+        ws.set_row_height(row_idx, 20).map_err(|e| e.to_string())?;
+
+        ws.write_string_with_format(row_idx, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 3, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 4, seq as f64, &fmt_text).map_err(|e| e.to_string())?;
+
+        ws.write_string_with_format(row_idx, 5, &sup.brief, &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 6, "2202", &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 7, "应付账款", &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 8, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 9, sup.amount, &fmt_money).map_err(|e| e.to_string())?;
+
+        ws.write_blank(row_idx, 10, &fmt_text).map_err(|e| e.to_string())?;
+
+        // 供应商辅助核算代码
+        if !sup.code.is_empty() {
+            ws.write_string_with_format(row_idx, 11, &sup.code, &fmt_text).map_err(|e| e.to_string())?;
+        } else {
+            ws.write_blank(row_idx, 11, &fmt_text).map_err(|e| e.to_string())?;
+        }
+
+        for c in 12..24 {
+            ws.write_blank(row_idx, c as u16, &fmt_text).map_err(|e| e.to_string())?;
+        }
+
+        ws.write_string_with_format(row_idx, 24, "RMB", &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 25, 1.0, &fmt_text).map_err(|e| e.to_string())?;
+
+        row_idx += 1;
+        seq += 1;
+    }
+
+    // 设置列宽
+    for c in 0..26 {
+        ws.set_column_width(c, 13).map_err(|e| e.to_string())?;
+    }
+    ws.set_column_width(0, 14).map_err(|e| e.to_string())?;
+    ws.set_column_width(5, 20).map_err(|e| e.to_string())?;
+    ws.set_column_width(7, 16).map_err(|e| e.to_string())?;
+    ws.set_column_width(8, 15).map_err(|e| e.to_string())?;
+    ws.set_column_width(9, 15).map_err(|e| e.to_string())?;
+    ws.set_column_width(11, 14).map_err(|e| e.to_string())?;
+    ws.set_column_width(15, 14).map_err(|e| e.to_string())?;
+
+    let out_path_buf = if let Some(co) = custom_output {
+        PathBuf::from(co)
+    } else {
+        let parent = in_p.parent().unwrap_or_else(|| Path::new("."));
+        let name_prefix = if is_tcm { "凭证导入模板_中药入库_已生成.xlsx" } else { "凭证导入模板_入库_已生成.xlsx" };
+        parent.join(name_prefix)
+    };
+
+    out_wb
+        .save(&out_path_buf)
+        .map_err(|e| format!("保存入库凭证 Excel 失败: {}", e))?;
+
+    let total_items = items.len();
+    let total_entries = (seq - 1) as usize;
+    let match_rate = if total_items > 0 {
+        ((matched_count as f64 / total_items as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    Ok(InboundVoucherResult {
+        success: true,
+        output_file: out_path_buf.to_string_lossy().to_string(),
+        voucher_date,
+        total_items,
+        total_entries,
+        matched_count,
+        unmatched_count: unmatched_items.len(),
+        match_rate,
+        total_qty: (total_qty * 100.0).round() / 100.0,
+        total_debit_amt: total_debit,
+        total_credit_amt: total_credit,
+        is_balanced,
+        suppliers_summary,
+        unmatched_items,
+        error: None,
+    })
+}

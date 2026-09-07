@@ -1,4 +1,4 @@
-name: Build Windows Application
+name: Build Windows Application (Pure Rust)
 
 on:
   push:
@@ -16,52 +16,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller pandas openpyxl xlrd xlwt xlutils
-
-      - name: Build standalone Python runner (runner.exe)
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "desktop_app/src-tauri/resources"
-          pyinstaller --onefile --noconsole --name runner `
-            --distpath "desktop_app/src-tauri/resources" `
-            --paths "." `
-            --paths "desktop_app/backend" `
-            --hidden-import xlrd `
-            --hidden-import xlwt `
-            --hidden-import xlutils `
-            --hidden-import xlutils.copy `
-            --hidden-import openpyxl `
-            --hidden-import pandas `
-            --hidden-import process_sales `
-            --hidden-import generate_voucher `
-            --hidden-import generate_inbound_voucher `
-            --hidden-import compare_inventory `
-            --add-data "process_sales.py;." `
-            --add-data "generate_voucher.py;." `
-            --add-data "generate_inbound_voucher.py;." `
-            --add-data "compare_inventory.py;." `
-            --add-data "factory_mapping.json;." `
-            desktop_app/backend/runner.py
-
-          if (Test-Path "desktop_app/src-tauri/resources/runner.exe") {
-            Write-Host ">>> runner.exe successfully built!" -ForegroundColor Green
-            Copy-Item "desktop_app/src-tauri/resources/runner.exe" -Destination "desktop_app/backend/runner.exe" -Force
-            # 运行冒烟自测
-            & "desktop_app/src-tauri/resources/runner.exe" scan
-          } else {
-            Write-Error "runner.exe failed to build!"
-            exit 1
-          }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -84,7 +38,7 @@ jobs:
         working-directory: desktop_app
         run: npm install
 
-      - name: Build Tauri Windows App
+      - name: Build Pure Rust Tauri Windows App
         working-directory: desktop_app
         run: npx tauri build
 
@@ -99,22 +53,32 @@ jobs:
             Write-Host "Found NSIS Setup: $($_.Name)" -ForegroundColor Green
           }
 
-          # 2. 打包绿色便携免安装版 (包含主程序与内置 Python Sidecar runner.exe)
+          # 2. 收集纯原生绿色便携免安装版 (仅单个轻量 exe，无任何 Python 运行时依赖)
           if (Test-Path "desktop_app/src-tauri/target/release/desktop_app.exe") {
-            New-Item -ItemType Directory -Force -Path "dist_artifacts/portable"
-            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/portable/医院财务凭证自动化系统.exe"
-            New-Item -ItemType Directory -Force -Path "dist_artifacts/portable/resources"
-            if (Test-Path "desktop_app/src-tauri/resources/runner.exe") {
-              Copy-Item "desktop_app/src-tauri/resources/runner.exe" -Destination "dist_artifacts/portable/resources/runner.exe"
+            New-Item -ItemType Directory -Force -Path "dist_artifacts/hospital_voucher_pure_rust_portable"
+            Copy-Item "desktop_app/src-tauri/target/release/desktop_app.exe" -Destination "dist_artifacts/hospital_voucher_pure_rust_portable/石家庄心理医院财务进销存工作台.exe"
+            if (Test-Path "factory_mapping.json") {
+              Copy-Item "factory_mapping.json" -Destination "dist_artifacts/hospital_voucher_pure_rust_portable/"
             }
-            Compress-Archive -Path "dist_artifacts/portable/*" -DestinationPath "dist_artifacts/医院财务凭证自动化系统_免安装绿色版.zip" -Force
-            Remove-Item -Recurse -Force "dist_artifacts/portable"
-            Write-Host "Created Portable ZIP bundle!" -ForegroundColor Green
+            Compress-Archive -Path "dist_artifacts/hospital_voucher_pure_rust_portable/*" -DestinationPath "dist_artifacts/医院财务凭证工作台_纯原生绿色便携版_x64.zip" -Force
+            Write-Host "Created Portable Pure Rust Zip package!" -ForegroundColor Green
           }
 
-      - name: Upload Windows Artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Hospital-Voucher-Studio-Windows-x64
+          name: windows-pure-rust-app
           path: dist_artifacts/*
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist_artifacts/*.exe
+            dist_artifacts/*.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
