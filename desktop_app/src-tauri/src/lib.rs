@@ -265,6 +265,59 @@ fn save_config(data: String, config: Option<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn execute_inventory_audit(
+    ledger: String,
+    west: Option<String>,
+    tcm: Option<String>,
+    hc: Option<String>,
+    config: Option<String>,
+    output: Option<String>,
+) -> Result<Value, String> {
+    let mut args = vec!["compare_inventory", "--ledger", &ledger];
+    let west_str;
+    if let Some(w) = &west {
+        if !w.trim().is_empty() {
+            west_str = w.clone();
+            args.push("--west");
+            args.push(&west_str);
+        }
+    }
+    let tcm_str;
+    if let Some(t) = &tcm {
+        if !t.trim().is_empty() {
+            tcm_str = t.clone();
+            args.push("--tcm");
+            args.push(&tcm_str);
+        }
+    }
+    let hc_str;
+    if let Some(h) = &hc {
+        if !h.trim().is_empty() {
+            hc_str = h.clone();
+            args.push("--hc");
+            args.push(&hc_str);
+        }
+    }
+    let cfg_str;
+    if let Some(c) = &config {
+        if !c.trim().is_empty() {
+            cfg_str = c.clone();
+            args.push("--config");
+            args.push(&cfg_str);
+        }
+    }
+    let out_str;
+    if let Some(o) = &output {
+        if !o.trim().is_empty() {
+            out_str = o.clone();
+            args.push("--output");
+            args.push(&out_str);
+        }
+    }
+    execute_runner(&args)
+}
+
+#[tauri::command]
 fn open_in_system(path: String) -> Result<bool, String> {
     let target = Path::new(&path);
     if !target.exists() {
@@ -341,6 +394,7 @@ pub fn run() {
             execute_sales_process,
             execute_outbound_voucher,
             execute_inbound_voucher,
+            execute_inventory_audit,
             get_config,
             save_config,
             open_in_system,

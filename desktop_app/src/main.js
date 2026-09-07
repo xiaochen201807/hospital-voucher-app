@@ -34,8 +34,12 @@ const state = {
   lastOutputs: {
     sales: null,
     outbound: null,
-    inbound: null
-  }
+    inbound: null,
+    compare: null
+  },
+  auditData: null,
+  currentAuditCat: 'ALL',
+  auditDiffOnly: false
 };
 
 // UI 辅助工具函数：Toast 消息通知
@@ -246,6 +250,24 @@ function autoFillDetectedFiles(data) {
   if (inTmpl && !inTmpl.value && data.template_files.length > 0) {
     inTmpl.value = data.template_files[0].path;
   }
+
+  // 账实库存核对输入框
+  const cmpLedger = document.getElementById('compare-ledger-file');
+  const cmpWest = document.getElementById('compare-west-file');
+  const cmpTcm = document.getElementById('compare-tcm-file');
+  const cmpHc = document.getElementById('compare-hc-file');
+  if (cmpLedger && !cmpLedger.value && data.ledger_files && data.ledger_files.length > 0) {
+    cmpLedger.value = data.ledger_files[0].path;
+  }
+  if (cmpWest && !cmpWest.value && data.west_wh_files && data.west_wh_files.length > 0) {
+    cmpWest.value = data.west_wh_files[0].path;
+  }
+  if (cmpTcm && !cmpTcm.value && data.tcm_wh_files && data.tcm_wh_files.length > 0) {
+    cmpTcm.value = data.tcm_wh_files[0].path;
+  }
+  if (cmpHc && !cmpHc.value && data.hc_wh_files && data.hc_wh_files.length > 0) {
+    cmpHc.value = data.hc_wh_files[0].path;
+  }
 }
 
 function applyScannedFileToActiveTab(item) {
@@ -274,6 +296,23 @@ function applyScannedFileToActiveTab(item) {
     } else {
       document.getElementById('inbound-file').value = item.path;
       showToast(`已填入入库单: ${name}`, 'info');
+    }
+  } else if (state.activeTab === 'tab-compare') {
+    if (name.includes('总账') || name.includes('数量金额')) {
+      document.getElementById('compare-ledger-file').value = item.path;
+      showToast(`已填入财务总账: ${name}`, 'info');
+    } else if (name.includes('西药')) {
+      document.getElementById('compare-west-file').value = item.path;
+      showToast(`已填入西药房库存表: ${name}`, 'info');
+    } else if (name.includes('中药')) {
+      document.getElementById('compare-tcm-file').value = item.path;
+      showToast(`已填入中药房库存表: ${name}`, 'info');
+    } else if (name.includes('耗材') || name.includes('材料')) {
+      document.getElementById('compare-hc-file').value = item.path;
+      showToast(`已填入耗材库库存表: ${name}`, 'info');
+    } else {
+      document.getElementById('compare-west-file').value = item.path;
+      showToast(`已填入库管库存表: ${name}`, 'info');
     }
   }
 }
@@ -927,7 +966,267 @@ function initTabConfig() {
 }
 
 // ----------------------------------------------------
-// 7. 全局 Tab 切换与应用初始化
+// 7. TAB 4: 账实库存智能核对 (compare_inventory)
+// ----------------------------------------------------
+function initTabCompare() {
+  const btnBrowseLedger = document.getElementById('btn-browse-compare-ledger');
+  const inputLedger = document.getElementById('compare-ledger-file');
+
+  const btnBrowseWest = document.getElementById('btn-browse-compare-west');
+  const inputWest = document.getElementById('compare-west-file');
+
+  const btnBrowseTcm = document.getElementById('btn-browse-compare-tcm');
+  const inputTcm = document.getElementById('compare-tcm-file');
+
+  const btnBrowseHc = document.getElementById('btn-browse-compare-hc');
+  const inputHc = document.getElementById('compare-hc-file');
+
+  const btnBrowseOut = document.getElementById('btn-browse-compare-output');
+  const inputOut = document.getElementById('compare-output-file');
+
+  const btnRun = document.getElementById('btn-run-compare');
+
+  // 文件浏览
+  if (btnBrowseLedger) {
+    btnBrowseLedger.onclick = async () => {
+      const f = await pickExcelFile('选择财务系统数量金额总账 (.xlsx)');
+      if (f) inputLedger.value = f;
+    };
+  }
+  if (btnBrowseWest) {
+    btnBrowseWest.onclick = async () => {
+      const f = await pickExcelFile('选择库管系统西药房库存汇总报表 (.xls / .xlsx)');
+      if (f) inputWest.value = f;
+    };
+  }
+  if (btnBrowseTcm) {
+    btnBrowseTcm.onclick = async () => {
+      const f = await pickExcelFile('选择库管系统中药房库存汇总报表 (.xls / .xlsx)');
+      if (f) inputTcm.value = f;
+    };
+  }
+  if (btnBrowseHc) {
+    btnBrowseHc.onclick = async () => {
+      const f = await pickExcelFile('选择库管系统耗材库库存汇总报表 (.xls / .xlsx)');
+      if (f) inputHc.value = f;
+    };
+  }
+  if (btnBrowseOut) {
+    btnBrowseOut.onclick = async () => {
+      const f = await pickExcelFile('选择或指定对账分析报告保存路径');
+      if (f) inputOut.value = f;
+    };
+  }
+
+  // 拖拽支持
+  [inputLedger, inputWest, inputTcm, inputHc].forEach(input => {
+    if (input) setupDropzone(input, input.closest('.file-input-row') || input.parentElement);
+  });
+
+  // 开始核对执行
+  if (btnRun) {
+    btnRun.onclick = async () => {
+      const ledger = inputLedger.value.trim();
+      const west = inputWest.value.trim();
+      const tcm = inputTcm.value.trim();
+      const hc = inputHc.value.trim();
+      const output = inputOut.value.trim();
+
+      if (!ledger) {
+        showToast('请指定财务系统数量金额总账文件！', 'warning');
+        inputLedger.focus();
+        return;
+      }
+
+      if (!west && !tcm && !hc) {
+        showToast('请至少提供一个库管系统的报表文件（西药房 / 中药房 / 耗材库）！', 'warning');
+        return;
+      }
+
+      showLoading('正在进行财务总账与各库管库存四维多库比对并生成审计报告...');
+
+      try {
+        const res = await invoke('execute_inventory_audit', {
+          ledger,
+          west: west || null,
+          tcm: tcm || null,
+          hc: hc || null,
+          config: null,
+          output: output || null
+        });
+
+        hideLoading();
+
+        if (res && res.success) {
+          state.auditData = res;
+          state.lastOutputs.compare = res.output_file;
+
+          renderCompareDashboard(res);
+          renderCompareTable();
+
+          showToast('账实库存多库智能核对完成！', 'success');
+        } else {
+          showToast(`核对失败: ${res?.error || '未知错误'}`, 'error');
+        }
+      } catch (err) {
+        hideLoading();
+        showToast(`核对执行异常: ${err}`, 'error');
+      }
+    };
+  }
+
+  // 库房分类 Tab 筛选切换
+  const catTabs = document.getElementById('compare-cat-tabs');
+  if (catTabs) {
+    catTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cat-pill');
+      if (!btn) return;
+      catTabs.querySelectorAll('.cat-pill').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.currentAuditCat = btn.dataset.cat || 'ALL';
+      renderCompareTable();
+    });
+  }
+
+  // 差异快速过滤复选框
+  const chkDiff = document.getElementById('chk-compare-diff-only');
+  if (chkDiff) {
+    chkDiff.addEventListener('change', () => {
+      state.auditDiffOnly = chkDiff.checked;
+      renderCompareTable();
+    });
+  }
+
+  // 打开报告与在文件夹中显示
+  const btnOpenReport = document.getElementById('btn-open-compare-excel');
+  if (btnOpenReport) {
+    btnOpenReport.onclick = () => {
+      if (state.lastOutputs.compare) {
+        openSystemPath(state.lastOutputs.compare);
+      } else {
+        showToast('尚未生成核对分析报告', 'warning');
+      }
+    };
+  }
+
+  const btnShowFolder = document.getElementById('btn-show-compare-folder');
+  if (btnShowFolder) {
+    btnShowFolder.onclick = () => {
+      if (state.lastOutputs.compare) {
+        showInSystemFolder(state.lastOutputs.compare);
+      } else {
+        showToast('尚未生成核对分析报告', 'warning');
+      }
+    };
+  }
+}
+
+// 渲染核对结果仪表盘卡片群
+function renderCompareDashboard(data) {
+  const card = document.getElementById('compare-result-card');
+  if (!card) return;
+  card.classList.remove('hidden');
+
+  document.getElementById('compare-output-path-text').textContent = data.output_file || '-';
+
+  const overall = data.overall || {};
+  document.getElementById('stat-compare-rate').textContent = `${overall.match_rate ?? 0.0}%`;
+  document.getElementById('stat-compare-total').textContent = (overall.total_items ?? 0).toLocaleString();
+  document.getElementById('stat-compare-equal').textContent = (overall.equal_count ?? 0).toLocaleString();
+  document.getElementById('stat-compare-diff').textContent = (overall.diff_count ?? 0).toLocaleString();
+  document.getElementById('stat-compare-ledger-only').textContent = (overall.ledger_only_count ?? 0).toLocaleString();
+  document.getElementById('stat-compare-wh-only').textContent = (overall.wh_only_count ?? 0).toLocaleString();
+  document.getElementById('stat-compare-diff-amt').textContent = formatMoney(overall.total_diff_amt ?? 0);
+}
+
+// 渲染核对交互式明细表格
+function renderCompareTable() {
+  const data = state.auditData;
+  if (!data || !data.categories) return;
+
+  const tbody = document.getElementById('compare-details-table')?.querySelector('tbody');
+  const counterEl = document.getElementById('compare-record-counter');
+  if (!tbody) return;
+
+  tbody.innerHTML = '';
+
+  // 1. 过滤当前选中的库别
+  let selectedCategories = data.categories;
+  if (state.currentAuditCat && state.currentAuditCat !== 'ALL') {
+    selectedCategories = data.categories.filter(c => c.category === state.currentAuditCat);
+  }
+
+  let allRecordsInCat = [];
+  selectedCategories.forEach(cat => {
+    allRecordsInCat = allRecordsInCat.concat(cat.records || []);
+  });
+
+  const totalInCat = allRecordsInCat.length;
+
+  // 2. 差异过滤
+  let displayRecords = allRecordsInCat;
+  if (state.auditDiffOnly) {
+    displayRecords = allRecordsInCat.filter(r => r.status !== 'EQUAL');
+  }
+
+  if (counterEl) {
+    counterEl.textContent = `显示 ${displayRecords.length} / ${totalInCat} 条品规`;
+  }
+
+  if (displayRecords.length === 0) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="13" style="text-align: center; color: var(--text-muted); padding: 24px;">暂无可显示的记录（${state.auditDiffOnly ? '该分类下无差异品规，全部账实吻合' : '无数据'}）</td>`;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  displayRecords.forEach(r => {
+    const tr = document.createElement('tr');
+
+    let statusTag = '';
+    let rowClass = '';
+
+    if (r.status === 'EQUAL') {
+      statusTag = '<span class="status-tag status-equal">数量完全吻合</span>';
+      rowClass = 'row-equal';
+    } else if (r.status === 'DIFF_QTY') {
+      statusTag = '<span class="status-tag status-diff">存在数量差异</span>';
+      rowClass = 'row-diff';
+    } else if (r.status === 'LEDGER_ONLY') {
+      statusTag = '<span class="status-tag status-ledger-only">仅财务有结存</span>';
+      rowClass = 'row-ledger-only';
+    } else if (r.status === 'WH_ONLY') {
+      statusTag = '<span class="status-tag status-wh-only">仅库管有在库</span>';
+      rowClass = 'row-wh-only';
+    }
+
+    tr.className = rowClass;
+
+    const diffQtyFormatted = r.diff_qty > 0 ? `+${r.diff_qty}` : `${r.diff_qty}`;
+    const diffQtyColor = r.diff_qty !== 0 ? (r.diff_qty > 0 ? '#f87171' : '#38bdf8') : 'inherit';
+    const diffAmtColor = r.diff_amt !== 0 ? (r.diff_amt > 0 ? '#f87171' : '#38bdf8') : 'inherit';
+
+    tr.innerHTML = `
+      <td><span class="cat-pill" style="padding: 2px 8px; font-size: 11px;">${r.category}</span></td>
+      <td>${statusTag}</td>
+      <td style="font-weight: 600; color: #fff;">${r.name}</td>
+      <td>${r.spec || '-'}</td>
+      <td style="color: var(--text-muted); font-size: 12px;">${r.factory || '-'}</td>
+      <td style="text-align: center;">${r.unit || '-'}</td>
+      <td style="font-family: monospace; color: #38bdf8;">${r.ledger_code || '-'}</td>
+      <td style="text-align: right; font-family: monospace;">${r.ledger_qty?.toLocaleString() ?? 0}</td>
+      <td style="text-align: right; font-family: monospace;">${r.wh_qty?.toLocaleString() ?? 0}</td>
+      <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffQtyColor};">${diffQtyFormatted}</td>
+      <td style="text-align: right; font-family: monospace;">${formatMoney(r.ledger_amt)}</td>
+      <td style="text-align: right; font-family: monospace;">${formatMoney(r.wh_amt)}</td>
+      <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffAmtColor};">${formatMoney(r.diff_amt)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ----------------------------------------------------
+// 8. 全局 Tab 切换与应用初始化
 // ----------------------------------------------------
 function setupTabNavigation() {
   const tabs = document.querySelectorAll('.nav-tab');
@@ -990,6 +1289,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initTabSales();
   initTabOutbound();
   initTabInbound();
+  initTabCompare();
   initTabConfig();
 
   // 预载配置与自动扫描

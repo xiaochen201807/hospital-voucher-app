@@ -45,9 +45,11 @@ jobs:
             --hidden-import process_sales `
             --hidden-import generate_voucher `
             --hidden-import generate_inbound_voucher `
+            --hidden-import compare_inventory `
             --add-data "process_sales.py;." `
             --add-data "generate_voucher.py;." `
             --add-data "generate_inbound_voucher.py;." `
+            --add-data "compare_inventory.py;." `
             --add-data "factory_mapping.json;." `
             desktop_app/backend/runner.py
 

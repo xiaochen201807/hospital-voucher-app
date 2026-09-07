@@ -52,6 +52,11 @@ try:
 except Exception as e:
     print(f"[Warning] 导入 generate_inbound_voucher 异常: {e}", file=sys.stderr)
 
+try:
+    import compare_inventory
+except Exception as e:
+    print(f"[Warning] 导入 compare_inventory 异常: {e}", file=sys.stderr)
+
 
 def cmd_scan(args):
     """扫描指定目录或工作区中的候选 Excel 文件"""
@@ -61,6 +66,9 @@ def cmd_scan(args):
         'inbound_files': [],
         'ledger_files': [],
         'template_files': [],
+        'west_wh_files': [],
+        'tcm_wh_files': [],
+        'hc_wh_files': [],
         'all_excel': []
     }
     if not os.path.exists(scan_dir):
@@ -78,10 +86,16 @@ def cmd_scan(args):
             res['sales_files'].append({'name': f, 'path': full_path})
         if '入库' in f and '模板' not in f:
             res['inbound_files'].append({'name': f, 'path': full_path})
-        if '总账' in f:
+        if '总账' in f or '数量金额' in f:
             res['ledger_files'].append({'name': f, 'path': full_path})
         if '模板' in f:
             res['template_files'].append({'name': f, 'path': full_path})
+        if '西药' in f and ('库存' in f or '报表' in f or '房' in f):
+            res['west_wh_files'].append({'name': f, 'path': full_path})
+        elif '中药' in f and ('库存' in f or '报表' in f or '房' in f):
+            res['tcm_wh_files'].append({'name': f, 'path': full_path})
+        elif ('耗材' in f or '材料' in f) and ('库存' in f or '报表' in f or '库' in f):
+            res['hc_wh_files'].append({'name': f, 'path': full_path})
 
     return {'success': True, 'data': res}
 
@@ -353,6 +367,39 @@ def cmd_save_config(args):
         return {'success': False, 'error': str(e)}
 
 
+def cmd_compare_inventory(args):
+    """执行账实库存智能核对"""
+    if 'compare_inventory' not in globals() or compare_inventory is None:
+        return {'success': False, 'error': "核心模块 compare_inventory 加载失败，请检查安装包完整性"}
+
+    ledger_file = args.ledger
+    if not ledger_file or not os.path.exists(ledger_file):
+        return {'success': False, 'error': f"财务总账文件 '{ledger_file}' 不存在"}
+
+    west_file = args.west if args.west and os.path.exists(args.west) else None
+    tcm_file = args.tcm if args.tcm and os.path.exists(args.tcm) else None
+    hc_file = args.hc if args.hc and os.path.exists(args.hc) else None
+
+    if not any([west_file, tcm_file, hc_file]):
+        return {'success': False, 'error': "请至少提供一个库管系统的报表文件（西药/中药/耗材）进行核对"}
+
+    config_file = find_config_path(args.config)
+    output_file = args.output
+
+    try:
+        res = compare_inventory.run_audit(
+            ledger_file=ledger_file,
+            west_wh_file=west_file,
+            tcm_wh_file=tcm_file,
+            hc_wh_file=hc_file,
+            config_file=config_file,
+            output_file=output_file
+        )
+        return res
+    except Exception as e:
+        return {'success': False, 'error': f"核对执行异常: {str(e)}"}
+
+
 def main():
     parser = argparse.ArgumentParser(description='Tauri 桌面端自动化统一调度引擎')
     subparsers = parser.add_subparsers(dest='action', help='子命令动作')
@@ -387,6 +434,15 @@ def main():
     p_in.add_argument('--voucher-no', default=None)
     p_in.add_argument('--config', default=None)
 
+    # compare_inventory (audit)
+    p_audit = subparsers.add_parser('compare_inventory')
+    p_audit.add_argument('--ledger', required=True)
+    p_audit.add_argument('--west', default=None)
+    p_audit.add_argument('--tcm', default=None)
+    p_audit.add_argument('--hc', default=None)
+    p_audit.add_argument('--config', default=None)
+    p_audit.add_argument('--output', default=None)
+
     # get_config
     p_get_cfg = subparsers.add_parser('get_config')
     p_get_cfg.add_argument('--config', default=None)
@@ -403,6 +459,7 @@ def main():
         'process_sales': cmd_process_sales,
         'generate_voucher': cmd_generate_voucher,
         'generate_inbound_voucher': cmd_generate_inbound_voucher,
+        'compare_inventory': cmd_compare_inventory,
         'get_config': cmd_get_config,
         'save_config': cmd_save_config,
     }

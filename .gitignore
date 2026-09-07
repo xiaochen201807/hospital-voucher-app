@@ -23,12 +23,13 @@ dist_artifacts/
 desktop_app/src-tauri/resources/*.exe
 desktop_app/backend/*.exe
 
-# Excel temp files
+# Excel and CSV business & test data files (医院敏感业务数据脱敏)
+*.xlsx
+*.xls
+*.csv
 ~$*.xlsx
 ~$*.xls
-
-# Generated output files (test runs)
-*已生成*.xlsx
+*已生成*
 
 # System files
 .DS_Store

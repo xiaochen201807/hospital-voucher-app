@@ -95,6 +95,18 @@
             </div>
           </button>
 
+          <button class="nav-tab" data-tab="tab-compare">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">账实库存核对</div>
+              <div class="nav-desc">总账数量与三库智能比对</div>
+            </div>
+          </button>
+
           <button class="nav-tab" data-tab="tab-config">
             <div class="nav-icon">
               <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
@@ -528,7 +540,198 @@
             </div>
           </section>
 
-          <!-- TAB 4: 厂家与字典配置 -->
+          <!-- TAB 4: 账实库存智能核对 -->
+          <section id="tab-compare" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">入库出库后账实库存智能核对</h2>
+                <p class="panel-desc">
+                  自动读取入库与出库结账后的【财务系统数量金额总账】，与库管系统导出的【西药房、中药房、耗材库库存汇总表】进行多库实盘对比，精准诊断结存差异并生成标准审计报告。
+                </p>
+              </div>
+            </div>
+
+            <!-- 表单输入卡片 -->
+            <div class="card form-card">
+              <div class="form-grid">
+                <!-- 财务总账 -->
+                <div class="form-group full-width">
+                  <label class="form-label required">
+                    <span>1. 财务系统数量金额总账 (.xlsx)</span>
+                    <span class="label-tip">必须包含期末结存数量与金额（如：石家庄心理医院_数量金额总账_...xlsx）</span>
+                  </label>
+                  <div class="file-input-row">
+                    <input type="text" id="compare-ledger-file" class="form-input" placeholder="请选择或输入财务导出的数量金额总账 Excel 路径" />
+                    <button id="btn-browse-compare-ledger" class="btn btn-secondary">浏览文件</button>
+                  </div>
+                </div>
+
+                <!-- 西药房库存报表 -->
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 库管系统 - 西药房库存汇总报表 (.xls / .xlsx)</span>
+                    <span class="label-tip">对应财务 1201_XY 西药存货科目</span>
+                  </label>
+                  <div class="file-input-row">
+                    <input type="text" id="compare-west-file" class="form-input" placeholder="选择西药房库存汇总报表" />
+                    <button id="btn-browse-compare-west" class="btn btn-secondary">浏览</button>
+                  </div>
+                </div>
+
+                <!-- 中药房库存报表 -->
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 库管系统 - 中药房库存汇总报表 (.xls / .xlsx)</span>
+                    <span class="label-tip">对应财务 1201_ZY 中药饮片存货科目</span>
+                  </label>
+                  <div class="file-input-row">
+                    <input type="text" id="compare-tcm-file" class="form-input" placeholder="选择中药房库存汇总报表（可选）" />
+                    <button id="btn-browse-compare-tcm" class="btn btn-secondary">浏览</button>
+                  </div>
+                </div>
+
+                <!-- 耗材库库存报表 -->
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>4. 库管系统 - 耗材库库存汇总报表 (.xls / .xlsx)</span>
+                    <span class="label-tip">对应财务 1201_HC 卫生材料与耗材科目</span>
+                  </label>
+                  <div class="file-input-row">
+                    <input type="text" id="compare-hc-file" class="form-input" placeholder="选择耗材库库存汇总报表（可选）" />
+                    <button id="btn-browse-compare-hc" class="btn btn-secondary">浏览</button>
+                  </div>
+                </div>
+
+                <!-- 输出分析报告路径 -->
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>5. 审计分析报告保存路径 (可选)</span>
+                    <span class="label-tip">留空默认保存至财务总账同级目录下</span>
+                  </label>
+                  <div class="file-input-row">
+                    <input type="text" id="compare-output-file" class="form-input" placeholder="默认自动生成《账实库存核对分析报告.xlsx》" />
+                    <button id="btn-browse-compare-output" class="btn btn-secondary">自定义</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 执行按钮区 -->
+              <div class="form-actions" style="margin-top: 20px;">
+                <button id="btn-run-compare" class="btn btn-primary btn-lg">
+                  <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  <span>开始账实多库智能核对</span>
+                </button>
+                <div class="form-hints">
+                  <span>💡 提示：系统支持西药、中药、耗材同时比对或任意单库独立比对；自动剥离库管末尾合计行与厂家括号别名。</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 核对审计结果仪表盘 -->
+            <div id="compare-result-card" class="card result-card hidden" style="margin-top: 20px;">
+              <div class="result-header">
+                <div class="result-status">
+                  <div class="status-badge success" id="compare-status-badge">核对审计完成</div>
+                  <div class="output-path-info">
+                    <span>分析报告已保存至：</span>
+                    <strong id="compare-output-path-text">-</strong>
+                  </div>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-compare-excel" class="btn btn-primary btn-sm">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                    <span>打开 Excel 报告</span>
+                  </button>
+                  <button id="btn-show-compare-folder" class="btn btn-secondary btn-sm">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                    <span>在文件夹中定位</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 核心 KPI 看板群 -->
+              <div class="stat-cards">
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-compare-rate">0.0%</div>
+                  <div class="stat-label">总体账实吻合率</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-compare-total">0</div>
+                  <div class="stat-label">核对总品规数</div>
+                </div>
+                <div class="stat-card success-card">
+                  <div class="stat-val" id="stat-compare-equal" style="color: var(--color-success, #10b981);">0</div>
+                  <div class="stat-label">数量完全吻合</div>
+                </div>
+                <div class="stat-card danger-card">
+                  <div class="stat-val" id="stat-compare-diff" style="color: var(--color-danger, #ef4444);">0</div>
+                  <div class="stat-label">存在数量差异</div>
+                </div>
+                <div class="stat-card warning-card">
+                  <div class="stat-val" id="stat-compare-ledger-only" style="color: var(--color-warning, #f59e0b);">0</div>
+                  <div class="stat-label">仅财务有结存</div>
+                </div>
+                <div class="stat-card info-card">
+                  <div class="stat-val" id="stat-compare-wh-only" style="color: var(--color-info, #38bdf8);">0</div>
+                  <div class="stat-label">仅库管有在库</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-compare-diff-amt" style="font-family: monospace;">¥ 0.00</div>
+                  <div class="stat-label">涉及差异净金额</div>
+                </div>
+              </div>
+
+              <!-- 分库过滤与视图切换条 -->
+              <div class="audit-filter-bar">
+                <div class="category-tabs" id="compare-cat-tabs">
+                  <button class="cat-pill active" data-cat="ALL">全部库房</button>
+                  <button class="cat-pill" data-cat="西药房">西药房</button>
+                  <button class="cat-pill" data-cat="中药房">中药房</button>
+                  <button class="cat-pill" data-cat="耗材库">耗材库</button>
+                </div>
+                <div class="filter-controls">
+                  <label class="filter-checkbox-label">
+                    <input type="checkbox" id="chk-compare-diff-only" />
+                    <span>⚠️ 仅看差异与异常品规（隐藏完全吻合）</span>
+                  </label>
+                  <span class="record-counter" id="compare-record-counter">显示 0 / 0 条品规</span>
+                </div>
+              </div>
+
+              <!-- 交互式对账明细大表 -->
+              <div class="table-container" style="max-height: 520px; overflow-y: auto;">
+                <table class="data-table audit-table" id="compare-details-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 70px;">库别</th>
+                      <th style="width: 100px;">核对状态</th>
+                      <th>药品 / 耗材名称</th>
+                      <th>规格</th>
+                      <th>生产厂家</th>
+                      <th style="text-align: center;">单位</th>
+                      <th>财务科目编码</th>
+                      <th style="text-align: right;">财务结存数量</th>
+                      <th style="text-align: right;">库管在库数量</th>
+                      <th style="text-align: right;">数量差异</th>
+                      <th style="text-align: right;">财务结存金额</th>
+                      <th style="text-align: right;">库管在库金额</th>
+                      <th style="text-align: right;">差异金额</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 5: 厂家与字典配置 -->
           <section id="tab-config" class="tab-panel">
             <div class="panel-header">
               <div class="panel-title-group">
@@ -700,6 +903,23 @@
                   </ul>
                 </li>
               </ol>
+            </div>
+
+            <div class="help-section">
+              <h3 class="help-section-title">
+                <span class="step-num">6</span>
+                <span>入库出库后账实库存多库比对与四维差异排查 (compare_inventory)</span>
+              </h3>
+              <p class="help-text">
+                当当期出库凭证与入库凭证全部记账完成后，财务【数量金额总账】的期末结存数量应当与药房库管系统现存实盘数量一致。系统支持西药（1201_XY）、中药（1201_ZY）、耗材（1201_HC）三库多维度自动对账：
+              </p>
+              <ul class="help-list">
+                <li><span class="badge badge-success">数量完全吻合</span> 财务期末结存数量 == 库管在库数量，差额为 0.00。</li>
+                <li><span class="badge badge-danger">存在数量差异</span> 财务与库管均有记录，但数量不符（如出入库单据跨月记账、漏记损耗盘亏等，报告将高亮显示差异数量与涉及金额）。</li>
+                <li><span class="badge badge-warning">仅财务有结存</span> 财务总账尚有结存余额，但库管系统在库数量已为 0（多见于已清库但财务尾数未调账）。</li>
+                <li><span class="badge badge-info">仅库管有在库</span> 库管在库有数量，但财务总账查无对应编码（多见于新药未同步建账或编码映射不一致）。</li>
+                <li><strong>审计报告产出</strong>：自动导出《账实库存核对分析报告.xlsx》，内置【各库汇总看板】、【差异重点排查清单】、【全部品规对照底稿】3个Sheet，可直接供两部门核对签章。</li>
+              </ul>
             </div>
           </div>
 
