@@ -72,13 +72,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.0
+          name: "石家庄心理医院财务进销存工作台 v1.0.0 (纯原生 Rust 版)"
+          draft: false
+          prerelease: false
+          body: |
+            ## 医院财务凭证与进销存自动化工作台 (v1.0.0 纯原生 Rust 架构版)
+            
+            ### 核心亮点：
+            - 🚀 **100% 纯原生 Rust 重写**：彻底移除 Python 依赖，安装包仅约 10MB，秒开极速运行！
+            - 📋 **账实库存多库智能核对**：月末自动比对财务数量金额总账与西药房、中药房、耗材库库存，自动生成三页审计分析报告。
+            - 📥 **药房入库双向审计**：西药/中药入库凭证自动借贷天平平衡校验，自动归集 22 家供应商应付账款。
+            - 📤 **销售汇总与出库凭证**：多笔处方智能去重加权，科目自动关联与厂家感知防串户。
+            - 📦 **双版本提供**：提供标准 Windows 安装程序（NSIS .exe）与解压即用绿色便携包（.zip）。
           files: |
             dist_artifacts/*.exe
             dist_artifacts/*.zip
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
