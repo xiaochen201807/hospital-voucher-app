@@ -28,7 +28,7 @@
       "nsis",
       "dmg"
     ],
-    "resources": [],
+    "resources": ["resources/*"],
     "windows": {
       "nsis": {
         "languages": [

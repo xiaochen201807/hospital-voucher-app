@@ -109,21 +109,7 @@ pub fn match_drug(
     let clean_drug = clean_text(drug_name);
     let clean_sp = clean_text(spec);
 
-    // 0. 特殊手动指定覆盖
-    for (k, v) in &config.drug_code_overrides {
-        if clean_text(k) == clean_drug || clean_text(k) == format!("{}{}", clean_drug, clean_sp) {
-            if let Some(target) = ledger.iter().find(|e| &e.code == v || &e.aux_code == v) {
-                return Some(target.clone());
-            }
-        }
-    }
-
-    // 严格厂家后缀保护（如海螵蛸）
-    let is_strict_drug = config
-        .strict_vendor_suffix_drugs
-        .iter()
-        .any(|d| clean_text(d) == clean_drug);
-
+    // 提取厂家简称
     let mut vendor_suffix = String::new();
     if !factory.is_empty() {
         for (full, brief) in &config.factory_abbreviations {
@@ -133,6 +119,45 @@ pub fn match_drug(
             }
         }
     }
+
+    // 0. 特殊手动指定覆盖（支持带厂家后缀的复合药名以及裸药名）
+    let mut override_cands = Vec::new();
+    if !vendor_suffix.is_empty() {
+        override_cands.push(clean_text(&format!("{}({})", drug_name, vendor_suffix)));
+        override_cands.push(clean_text(&format!("{}（{}）", drug_name, vendor_suffix)));
+        override_cands.push(clean_text(&format!("{}{}", drug_name, vendor_suffix)));
+    }
+    if !factory.is_empty() {
+        override_cands.push(clean_text(&format!("{}({})", drug_name, factory)));
+        override_cands.push(clean_text(&format!("{}（{}）", drug_name, factory)));
+    }
+    if !spec.is_empty() {
+        override_cands.push(clean_text(&format!("{}{}", drug_name, spec)));
+    }
+    override_cands.push(clean_drug.clone());
+
+    for (k, v) in &config.drug_code_overrides {
+        let clean_k = clean_text(k);
+        if override_cands.iter().any(|c| c == &clean_k) {
+            let trimmed_v = v.trim();
+            // 如果配置为空字符串 ""，代表该品规明确需拦截人工建档，立即返回 None 阻断穿透！
+            if trimmed_v.is_empty() {
+                return None;
+            }
+            if let Some(target) = ledger.iter().find(|e| e.code == trimmed_v || e.aux_code == trimmed_v) {
+                return Some(target.clone());
+            } else {
+                // 手动指定了编码但在总账中未找到对应科目，同样安全返回 None，严禁盲目穿透
+                return None;
+            }
+        }
+    }
+
+    // 严格厂家后缀保护（如海螵蛸）
+    let is_strict_drug = config
+        .strict_vendor_suffix_drugs
+        .iter()
+        .any(|d| clean_text(d) == clean_drug);
 
     // 优先级 1: 全名 + 厂家全词精准匹配
     if !vendor_suffix.is_empty() {
@@ -145,8 +170,9 @@ pub fn match_drug(
         }
     }
 
-    // 如果属于严格锁定厂家药品但总账中没有对应的厂家条目，安全拦截置空防串户！
-    if is_strict_drug && !vendor_suffix.is_empty() {
+    // 严格厂家药品只允许命中“药名 + 厂家”的科目；厂家为空、未配置或未命中时，
+    // 都不能回退到同名通用科目，否则会造成串户。
+    if is_strict_drug {
         return None;
     }
 
@@ -159,23 +185,34 @@ pub fn match_drug(
         }
     }
 
-    // 优先级 3: 仅全名完全一致（且总账中只有唯一条目或无冲突）
+    // 优先级 3: 仅全名完全一致（若有多条候选，必须通过规格明确排他匹配，严禁盲目取第一条）
     let candidates: Vec<&LedgerEntry> = ledger
         .iter()
         .filter(|e| clean_text(&e.drug_name) == clean_drug)
         .collect();
 
     if candidates.len() == 1 {
-        return Some(candidates[0].clone());
-    } else if candidates.len() > 1 {
-        // 尝试规格包含比对
-        for c in &candidates {
-            let c_sp = clean_text(&c.spec);
-            if !c_sp.is_empty() && (clean_sp.contains(&c_sp) || c_sp.contains(&clean_sp)) {
-                return Some((*c).clone());
-            }
+        // 如果是严格厂家保护药，且总账无厂家条目，禁止回退到无厂家的通用条目
+        if is_strict_drug {
+            return None;
         }
         return Some(candidates[0].clone());
+    } else if candidates.len() > 1 {
+        // 尝试规格精准匹配或包含比对
+        let mut matched_cand = None;
+        let mut match_count = 0;
+        for c in &candidates {
+            let c_sp = clean_text(&c.spec);
+            if !c_sp.is_empty() && !clean_sp.is_empty() && (clean_sp == c_sp || clean_sp.contains(&c_sp) || c_sp.contains(&clean_sp)) {
+                matched_cand = Some((*c).clone());
+                match_count += 1;
+            }
+        }
+        // 只有当规格能唯一确切命中时才返回，存在歧义时返回 None 要求人工确认
+        if match_count == 1 {
+            return matched_cand;
+        }
+        return None;
     }
 
     None
@@ -193,13 +230,16 @@ pub fn generate_outbound_voucher(
 ) -> Result<OutboundVoucherResult, String> {
     let sales_p = Path::new(sales_path);
     let ledger_p = Path::new(ledger_path);
-    let _tmpl_p = Path::new(template_path);
+    let tmpl_p = Path::new(template_path);
 
     if !sales_p.exists() {
         return Err(format!("销售表 '{:?}' 不存在", sales_p));
     }
     if !ledger_p.exists() {
         return Err(format!("总账表 '{:?}' 不存在", ledger_p));
+    }
+    if !tmpl_p.exists() {
+        return Err(format!("凭证模板文件 '{:?}' 不存在", tmpl_p));
     }
 
     // 1. 读取总账建立字典
@@ -236,13 +276,43 @@ pub fn generate_outbound_voucher(
     let col_factory = find_col_idx(header, &["制药厂", "生产厂家", "厂家"]).unwrap_or(col_spec + 2);
     let col_qty = find_col_idx(header, &["数量", "实发数量"]).unwrap_or(col_spec + 4);
     let col_price = find_col_idx(header, &["进价", "成本单价", "销售进价"]).unwrap_or(col_qty + 1);
+    let col_date = find_col_idx(header, &["销售日期", "日期"]);
 
-    // 凭证日期判定
-    let voucher_date = target_date_opt
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "2026-08-31".to_string());
+    let mut source_dates = Vec::new();
+    if let Some(date_col) = col_date {
+        for row in rows.iter().skip(h_idx + 1) {
+            let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
+            if name.is_empty() || name.contains("合计") || name.contains("总计") {
+                continue;
+            }
+            if let Some(date_cell) = row.get(date_col) {
+                let date_value = cell_as_string(date_cell);
+                if !date_value.is_empty() {
+                    source_dates.push(date_value);
+                }
+            }
+        }
+    }
 
-    // 3. 开始使用 rust_xlsxwriter 构造高保真凭证导入表
+    // 凭证日期动态推断
+    let voucher_date = crate::core::config::detect_voucher_date_with_source_dates(
+        target_date_opt,
+        &[sales_path, ledger_path],
+        &source_dates,
+    );
+
+    // 读取原凭证模板中所有 Sheet 数据。
+    let mut tmpl_sheets = Vec::new();
+    let mut tmpl_wb = open_excel(tmpl_p)?;
+    for s in tmpl_wb.sheet_names() {
+        let range = tmpl_wb
+            .worksheet_range(&s)
+            .map_err(|e| format!("读取凭证模板工作表 '{}' 失败: {}", s, e))?;
+        let r_rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
+        tmpl_sheets.push((s.to_string(), r_rows));
+    }
+
+    // 3. 开始使用 rust_xlsxwriter 构造凭证导入表
     let mut wb_out = Workbook::new();
     let ws_voucher = wb_out.add_worksheet();
     ws_voucher.set_name("凭证模版").map_err(|e| e.to_string())?;
@@ -341,9 +411,9 @@ pub fn generate_outbound_voucher(
             (m.aux_code, p)
         } else {
             let reason = if config.strict_vendor_suffix_drugs.iter().any(|d| clean_text(d) == clean_text(&name)) {
-                format!("严格锁定厂家药品，总账中未找到匹配的厂家细分科目")
+                "严格锁定厂家药品，总账中未找到匹配的厂家细分科目".to_string()
             } else {
-                format!("总账中未检索到匹配的存货科目编码")
+                "总账中未检索到匹配的存货科目编码".to_string()
             };
             let amt = (qty * raw_price * 100.0).round() / 100.0;
             unmatched_items.push(UnmatchedDrug {
@@ -416,6 +486,54 @@ pub fn generate_outbound_voucher(
     ws_voucher.set_column_width(15, 14).map_err(|e| e.to_string())?;
     ws_voucher.set_column_width(23, 15).map_err(|e| e.to_string())?;
 
+    // 复制原模板中的其他附表（例如“辅助核算”、“科目代码”等工作表）的单元格数据。
+    // 凭证主表由程序重新生成；rust_xlsxwriter 无法保留原工作簿的全部样式/合并/验证元数据。
+    for (s_name, s_rows) in tmpl_sheets {
+        if s_name.contains("凭证") || s_name.contains("模版") {
+            continue;
+        }
+        let ws_extra = wb_out.add_worksheet();
+        ws_extra.set_name(&s_name).map_err(|e| e.to_string())?;
+        for (r_idx, row) in s_rows.iter().enumerate() {
+            for (c_idx, cell) in row.iter().enumerate() {
+                match cell {
+                    calamine::Data::Float(f) => {
+                        ws_extra
+                            .write_number(r_idx as u32, c_idx as u16, *f)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::Int(i) => {
+                        ws_extra
+                            .write_number(r_idx as u32, c_idx as u16, *i as f64)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::String(s) => {
+                        ws_extra
+                            .write_string(r_idx as u32, c_idx as u16, s)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::Bool(b) => {
+                        ws_extra
+                            .write_boolean(r_idx as u32, c_idx as u16, *b)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::DateTime(_)
+                    | calamine::Data::DateTimeIso(_)
+                    | calamine::Data::DurationIso(_)
+                    | calamine::Data::Error(_) => {
+                        let value = cell_as_string(cell);
+                        if !value.is_empty() {
+                            ws_extra
+                                .write_string(r_idx as u32, c_idx as u16, &value)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    calamine::Data::Empty => {}
+                }
+            }
+        }
+    }
+
     // 确定输出路径
     let out_path_buf = if let Some(co) = custom_output {
         PathBuf::from(co)
@@ -448,4 +566,75 @@ pub fn generate_outbound_voucher(
         unmatched_items,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ledger_entry(drug_name: &str, spec: &str) -> LedgerEntry {
+        LedgerEntry {
+            code: "1201_TEST".to_string(),
+            aux_code: "TEST".to_string(),
+            name_full: format!("存货_{} {}", drug_name, spec),
+            drug_name: drug_name.to_string(),
+            spec: spec.to_string(),
+            price: 1.0,
+            end_qty: 1.0,
+        }
+    }
+
+    #[test]
+    fn strict_drug_does_not_fall_back_to_generic_entry_without_vendor() {
+        let mut config = ConfigData::default();
+        config.strict_vendor_suffix_drugs.push("海螵蛸".to_string());
+        let ledger = vec![ledger_entry("海螵蛸", "1克*1000克/袋")];
+
+        assert!(match_drug("海螵蛸", "1克*1000克/袋", "", &ledger, &config).is_none());
+    }
+
+    #[test]
+    fn strict_drug_matches_only_the_configured_vendor_entry() {
+        let mut config = ConfigData::default();
+        config.strict_vendor_suffix_drugs.push("海螵蛸".to_string());
+        config
+            .factory_abbreviations
+            .insert("河北蕴德药业有限公司".to_string(), "蕴德".to_string());
+        let ledger = vec![ledger_entry("海螵蛸蕴德", "1克*1000克/袋")];
+
+        let matched = match_drug(
+            "海螵蛸",
+            "1克*1000克/袋",
+            "河北蕴德药业有限公司",
+            &ledger,
+            &config,
+        )
+        .expect("应命中带厂家后缀的科目");
+        assert_eq!(matched.drug_name, "海螵蛸蕴德");
+    }
+
+    #[test]
+    fn real_outbound_workbook_still_generates_successfully() {
+        let (config, _) = crate::core::config::load_config(None);
+        let output = std::env::temp_dir().join(format!(
+            "desktop_app_outbound_test_{}.xlsx",
+            std::process::id()
+        ));
+        let output_string = output.to_string_lossy().to_string();
+
+        let result = generate_outbound_voucher(
+            "../../2026.8月西药销售表_已汇总.xlsx",
+            "../../石家庄心理医院_数量金额总账_20260907173619.xlsx",
+            "../../凭证导入模板.xlsx",
+            Some(&output_string),
+            None,
+            true,
+            &config,
+        )
+        .expect("真实销售样例应能生成凭证");
+
+        assert_eq!(result.voucher_date, "2026-08-31");
+        assert!(output.exists());
+        std::fs::remove_file(output).expect("应清理出库测试输出");
+    }
 }

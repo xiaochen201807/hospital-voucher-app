@@ -693,6 +693,7 @@ body {
 /* 表格系统 */
 .table-container {
   max-height: 280px;
+  overflow-x: auto;
   overflow-y: auto;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -704,6 +705,15 @@ body {
   border-collapse: collapse;
   font-size: 12px;
   text-align: left;
+}
+
+.audit-table {
+  min-width: 1260px;
+}
+
+.audit-table th,
+.audit-table td {
+  white-space: nowrap;
 }
 
 .data-table th {

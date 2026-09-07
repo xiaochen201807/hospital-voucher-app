@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Manager;
+
+const CONFIG_FILE_NAME: &str = "factory_mapping.json";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ScannedItem {
@@ -32,12 +35,74 @@ struct ScanResponse {
     error: Option<String>,
 }
 
+fn runtime_config_path(app: &tauri::AppHandle, custom: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(path) = custom.map(str::trim).filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join(CONFIG_FILE_NAME))
+        .map_err(|e| format!("获取应用配置目录失败: {}", e))
+}
+
+fn load_runtime_config(
+    app: &tauri::AppHandle,
+    custom: Option<&str>,
+) -> (core::config::ConfigData, PathBuf) {
+    match runtime_config_path(app, custom) {
+        Ok(path) if path.exists() || custom.is_some() => core::config::load_config_from_path(&path),
+        Ok(path) => {
+            // 首次运行时以安装包内的只读配置作为默认值，但保存位置仍固定为用户配置目录。
+            let (cfg, _) = core::config::load_config(None);
+            (cfg, path)
+        }
+        Err(_) => core::config::load_config(custom),
+    }
+}
+
+fn save_runtime_config(
+    app: &tauri::AppHandle,
+    data: &core::config::ConfigData,
+    custom: Option<&str>,
+) -> Result<PathBuf, String> {
+    let path = runtime_config_path(app, custom)?;
+    core::config::save_config_to_path(data, &path)
+}
+
 #[tauri::command]
 fn scan_files(dir: Option<String>) -> Result<Value, String> {
     let scan_path = if let Some(d) = dir {
         PathBuf::from(d)
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        let cur = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // 检查当前目录下是否有 xls/xlsx 文件
+        let has_excel = fs::read_dir(&cur)
+            .map(|entries| {
+                entries.filter_map(|e| e.ok()).any(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    (n.ends_with(".xlsx") || n.ends_with(".xls")) && !n.starts_with("~$")
+                })
+            })
+            .unwrap_or(false);
+
+        if has_excel {
+            cur
+        } else {
+            // 尝试用户主目录下的 Downloads 或 Desktop 目录
+            let home_opt = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+            let mut fallback = cur.clone();
+            if let Some(h) = home_opt {
+                let dl = PathBuf::from(&h).join("Downloads");
+                let dt = PathBuf::from(&h).join("Desktop");
+                if dl.exists() {
+                    fallback = dl;
+                } else if dt.exists() {
+                    fallback = dt;
+                }
+            }
+            fallback
+        }
     };
 
     if !scan_path.exists() {
@@ -113,7 +178,9 @@ fn execute_sales_process(file: String, output: Option<String>, sheet_name: Optio
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn execute_outbound_voucher(
+    app: tauri::AppHandle,
     sales: String,
     ledger: String,
     template: String,
@@ -122,7 +189,7 @@ fn execute_outbound_voucher(
     fallback_price: Option<bool>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = core::config::load_config(config.as_deref());
+    let (cfg, _) = load_runtime_config(&app, config.as_deref());
     match core::outbound::generate_outbound_voucher(
         &sales,
         &ledger,
@@ -138,7 +205,9 @@ fn execute_outbound_voucher(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn execute_inbound_voucher(
+    app: tauri::AppHandle,
     inbound: String,
     ledger: String,
     template: String,
@@ -147,7 +216,7 @@ fn execute_inbound_voucher(
     voucher_no: Option<String>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = core::config::load_config(config.as_deref());
+    let (cfg, _) = load_runtime_config(&app, config.as_deref());
     match core::inbound::generate_inbound_voucher(
         &inbound,
         &ledger,
@@ -164,6 +233,7 @@ fn execute_inbound_voucher(
 
 #[tauri::command]
 fn execute_inventory_audit(
+    app: tauri::AppHandle,
     ledger: String,
     west: Option<String>,
     tcm: Option<String>,
@@ -171,7 +241,7 @@ fn execute_inventory_audit(
     config: Option<String>,
     output: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = core::config::load_config(config.as_deref());
+    let (cfg, _) = load_runtime_config(&app, config.as_deref());
     match core::audit::run_inventory_audit(
         &ledger,
         west.as_deref(),
@@ -186,8 +256,8 @@ fn execute_inventory_audit(
 }
 
 #[tauri::command]
-fn get_config(config: Option<String>) -> Result<Value, String> {
-    let (cfg, path) = core::config::load_config(config.as_deref());
+fn get_config(app: tauri::AppHandle, config: Option<String>) -> Result<Value, String> {
+    let (cfg, path) = load_runtime_config(&app, config.as_deref());
     Ok(json!({
         "success": true,
         "data": cfg,
@@ -196,13 +266,13 @@ fn get_config(config: Option<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn save_config(data: String, config: Option<String>) -> Result<Value, String> {
+fn save_config(app: tauri::AppHandle, data: String, config: Option<String>) -> Result<Value, String> {
     let cfg_data: core::config::ConfigData = match serde_json::from_str(&data) {
         Ok(d) => d,
         Err(e) => return Ok(json!({ "success": false, "error": format!("解析配置 JSON 格式失败: {}", e) })),
     };
 
-    match core::config::save_config_to_file(&cfg_data, config.as_deref()) {
+    match save_runtime_config(&app, &cfg_data, config.as_deref()) {
         Ok(p) => Ok(json!({
             "success": true,
             "message": "配置保存成功",
@@ -312,12 +382,12 @@ mod tests {
     #[test]
     fn test_sales_and_audit() {
         let (cfg, _) = core::config::load_config(None);
-        let sales_res = core::sales::process_sales_file("../../2026.8月西药销售表.xls", None, None);
-        if let Ok(res) = sales_res {
-            assert_eq!(res.totals.unique_count, 54);
-            assert_eq!(res.totals.original_count, 82);
-            println!(">>> 纯 Rust 销售汇总成功: {} 种去重药品 (原 {} 笔), 总件数: {}", res.totals.unique_count, res.totals.original_count, res.totals.total_qty);
-        }
+        let sales_res = core::sales::process_sales_file("../../2026.8月西药销售表.xls", None, None)
+            .expect("销售汇总处理必须成功");
+        assert_eq!(sales_res.totals.unique_count, 54);
+        assert_eq!(sales_res.totals.original_count, 82);
+        assert_eq!(sales_res.totals.total_qty as i64, 139353);
+        println!(">>> 纯 Rust 销售汇总验证成功: {} 种去重药品 (原 {} 笔), 总件数: {}", sales_res.totals.unique_count, sales_res.totals.original_count, sales_res.totals.total_qty);
 
         let audit_res = core::audit::run_inventory_audit(
             "../../石家庄心理医院_数量金额总账_20260907173619.xlsx",
@@ -326,11 +396,20 @@ mod tests {
             None,
             None,
             &cfg
+        ).expect("账实核对处理必须成功");
+
+        println!(
+            ">>> 纯 Rust 账实核对成功: 总品规 {}, 吻合 {}, 差异 {}, 吻合率 {}%",
+            audit_res.overall.total_items,
+            audit_res.overall.equal_count,
+            audit_res.overall.diff_count,
+            audit_res.overall.match_rate
         );
-        if let Ok(res) = audit_res {
-            println!(">>> 纯 Rust 账实核对成功: 总品规 {}, 吻合率 {}%", res.overall.total_items, res.overall.match_rate);
-            assert!(res.overall.total_items > 0);
-        }
+        assert_eq!(audit_res.overall.total_items, 89);
+        assert_eq!(audit_res.overall.equal_count, 79);
+        assert_eq!(audit_res.overall.diff_count, 6);
+        assert_eq!(audit_res.overall.wh_only_count + audit_res.overall.ledger_only_count, 4);
+        assert_eq!(audit_res.overall.total_items - audit_res.overall.equal_count, 10);
+        assert!((audit_res.overall.match_rate - 88.76).abs() < 0.2);
     }
 }
-

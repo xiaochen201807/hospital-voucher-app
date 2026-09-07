@@ -144,7 +144,7 @@ pub fn generate_inbound_voucher(
     template_path: &str,
     custom_output: Option<&str>,
     target_date_opt: Option<&str>,
-    _voucher_no: Option<&str>,
+    voucher_no: Option<&str>,
     config: &ConfigData,
 ) -> Result<InboundVoucherResult, String> {
     let in_p = Path::new(inbound_path);
@@ -157,12 +157,24 @@ pub fn generate_inbound_voucher(
     if !ledger_p.exists() {
         return Err(format!("总账文件 '{:?}' 不存在", ledger_p));
     }
+    if !tmpl_p.exists() {
+        return Err(format!("凭证模板文件 '{:?}' 不存在", tmpl_p));
+    }
 
     // 1. 读取总账建立字典
     let ledger_entries = load_ledger_entries(ledger_p)?;
 
-    // 2. 读取供应商字典
+    // 2. 读取供应商字典与模板所有 Sheet
     let supplier_dict = load_supplier_dict(tmpl_p);
+    let mut tmpl_sheets = Vec::new();
+    let mut tmpl_wb = open_excel(tmpl_p)?;
+    for s in tmpl_wb.sheet_names() {
+        let range = tmpl_wb
+            .worksheet_range(&s)
+            .map_err(|e| format!("读取凭证模板工作表 '{}' 失败: {}", s, e))?;
+        let r_rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
+        tmpl_sheets.push((s.to_string(), r_rows));
+    }
 
     // 3. 读取入库单明细
     let mut in_wb = open_excel(in_p)?;
@@ -198,16 +210,16 @@ pub fn generate_inbound_voucher(
     let col_qty = find_col_idx(header, &["数量", "入库数量"]).unwrap_or(col_unit + 1);
     let col_price = find_col_idx(header, &["进价", "成本单价", "单价"]).unwrap_or(col_qty + 1);
     let col_amt = find_col_idx(header, &["金额", "进价金额", "入库金额"]).unwrap_or(col_price + 1);
+    let col_date = find_col_idx(header, &["入库日期", "日期"]);
 
     let is_tcm = inbound_path.contains("中药");
-    let subject_code_debit = if is_tcm { "1201_ZY" } else { "1201_XY" };
-    let subject_name_debit = if is_tcm { "中药饮片" } else { "库存商品" };
+    let subject_code_debit = "1201";
+    let subject_code_credit = "220201";
 
-    let voucher_date = target_date_opt
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "2026-08-31".to_string());
+    let v_no_str = voucher_no.unwrap_or("").trim();
 
     let mut items = Vec::new();
+    let mut source_dates = Vec::new();
     let mut total_debit = 0.0;
     let mut total_qty = 0.0;
 
@@ -218,6 +230,15 @@ pub fn generate_inbound_voucher(
         let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
         if name.is_empty() || name.contains("合计") || name.contains("总计") {
             continue;
+        }
+
+        if let Some(date_col) = col_date {
+            if let Some(date_cell) = row.get(date_col) {
+                let date_value = cell_as_string(date_cell);
+                if !date_value.is_empty() {
+                    source_dates.push(date_value);
+                }
+            }
         }
 
         let spec = row.get(col_spec).map(cell_as_string).unwrap_or_default();
@@ -246,6 +267,12 @@ pub fn generate_inbound_voucher(
             unit,
         });
     }
+
+    let voucher_date = crate::core::config::detect_voucher_date_with_source_dates(
+        target_date_opt,
+        &[inbound_path, ledger_path],
+        &source_dates,
+    );
 
     // 供应商汇总 (贷方)
     let mut sup_group: BTreeMap<String, f64> = BTreeMap::new();
@@ -340,9 +367,9 @@ pub fn generate_inbound_voucher(
             m.aux_code
         } else {
             let reason = if config.strict_vendor_suffix_drugs.iter().any(|d| clean_text(d) == clean_text(&it.name)) {
-                format!("严格锁定厂家药品，总账未查到匹配厂家科目")
+                "严格锁定厂家药品，总账未查到匹配厂家科目".to_string()
             } else {
-                format!("总账中未查到对应存货编码")
+                "总账中未查到对应存货编码".to_string()
             };
             unmatched_items.push(UnmatchedDrug {
                 name: it.name.clone(),
@@ -364,14 +391,23 @@ pub fn generate_inbound_voucher(
 
         ws.write_string_with_format(row_idx, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
         ws.write_string_with_format(row_idx, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
-        ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        if !v_no_str.is_empty() {
+            ws.write_string_with_format(row_idx, 2, v_no_str, &fmt_text).map_err(|e| e.to_string())?;
+        } else {
+            ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        }
         ws.write_blank(row_idx, 3, &fmt_text).map_err(|e| e.to_string())?;
         ws.write_number_with_format(row_idx, 4, seq as f64, &fmt_text).map_err(|e| e.to_string())?;
 
-        let brief = format!("入库-{}", it.name);
-        ws.write_string_with_format(row_idx, 5, &brief, &fmt_left).map_err(|e| e.to_string())?;
+        let sup_brief = get_supplier_brief(&it.supplier);
+        let summary_text = if !sup_brief.is_empty() {
+            sup_brief
+        } else {
+            format!("入库-{}", it.name)
+        };
+        ws.write_string_with_format(row_idx, 5, &summary_text, &fmt_left).map_err(|e| e.to_string())?;
         ws.write_string_with_format(row_idx, 6, subject_code_debit, &fmt_text).map_err(|e| e.to_string())?;
-        ws.write_string_with_format(row_idx, 7, subject_name_debit, &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 7, &fmt_left).map_err(|e| e.to_string())?;
         ws.write_number_with_format(row_idx, 8, it.amount, &fmt_money).map_err(|e| e.to_string())?;
         ws.write_blank(row_idx, 9, &fmt_text).map_err(|e| e.to_string())?;
 
@@ -405,13 +441,18 @@ pub fn generate_inbound_voucher(
 
         ws.write_string_with_format(row_idx, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
         ws.write_string_with_format(row_idx, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
-        ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        if !v_no_str.is_empty() {
+            ws.write_string_with_format(row_idx, 2, v_no_str, &fmt_text).map_err(|e| e.to_string())?;
+        } else {
+            ws.write_blank(row_idx, 2, &fmt_text).map_err(|e| e.to_string())?;
+        }
         ws.write_blank(row_idx, 3, &fmt_text).map_err(|e| e.to_string())?;
         ws.write_number_with_format(row_idx, 4, seq as f64, &fmt_text).map_err(|e| e.to_string())?;
 
-        ws.write_string_with_format(row_idx, 5, &sup.brief, &fmt_left).map_err(|e| e.to_string())?;
-        ws.write_string_with_format(row_idx, 6, "2202", &fmt_text).map_err(|e| e.to_string())?;
-        ws.write_string_with_format(row_idx, 7, "应付账款", &fmt_left).map_err(|e| e.to_string())?;
+        let sup_summary = sup.brief.clone();
+        ws.write_string_with_format(row_idx, 5, &sup_summary, &fmt_left).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 6, subject_code_credit, &fmt_text).map_err(|e| e.to_string())?;
+        ws.write_blank(row_idx, 7, &fmt_left).map_err(|e| e.to_string())?;
         ws.write_blank(row_idx, 8, &fmt_text).map_err(|e| e.to_string())?;
         ws.write_number_with_format(row_idx, 9, sup.amount, &fmt_money).map_err(|e| e.to_string())?;
 
@@ -446,6 +487,54 @@ pub fn generate_inbound_voucher(
     ws.set_column_width(9, 15).map_err(|e| e.to_string())?;
     ws.set_column_width(11, 14).map_err(|e| e.to_string())?;
     ws.set_column_width(15, 14).map_err(|e| e.to_string())?;
+
+    // 复制原模板中的其他附表（例如“辅助核算”、“科目代码”等工作表）的单元格数据。
+    // 凭证主表由程序重新生成；rust_xlsxwriter 无法保留原工作簿的全部样式/合并/验证元数据。
+    for (s_name, s_rows) in tmpl_sheets {
+        if s_name.contains("凭证") || s_name.contains("模版") {
+            continue;
+        }
+        let ws_extra = out_wb.add_worksheet();
+        ws_extra.set_name(&s_name).map_err(|e| e.to_string())?;
+        for (r_idx, row) in s_rows.iter().enumerate() {
+            for (c_idx, cell) in row.iter().enumerate() {
+                match cell {
+                    calamine::Data::Float(f) => {
+                        ws_extra
+                            .write_number(r_idx as u32, c_idx as u16, *f)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::Int(i) => {
+                        ws_extra
+                            .write_number(r_idx as u32, c_idx as u16, *i as f64)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::String(s) => {
+                        ws_extra
+                            .write_string(r_idx as u32, c_idx as u16, s)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::Bool(b) => {
+                        ws_extra
+                            .write_boolean(r_idx as u32, c_idx as u16, *b)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    calamine::Data::DateTime(_)
+                    | calamine::Data::DateTimeIso(_)
+                    | calamine::Data::DurationIso(_)
+                    | calamine::Data::Error(_) => {
+                        let value = cell_as_string(cell);
+                        if !value.is_empty() {
+                            ws_extra
+                                .write_string(r_idx as u32, c_idx as u16, &value)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    calamine::Data::Empty => {}
+                }
+            }
+        }
+    }
 
     let out_path_buf = if let Some(co) = custom_output {
         PathBuf::from(co)
@@ -484,4 +573,57 @@ pub fn generate_inbound_voucher(
         unmatched_items,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplier_brief_contains_the_suffix_exactly_once() {
+        assert_eq!(get_supplier_brief("河北蕴德药业有限公司"), "河北蕴德到货");
+        assert_eq!(get_supplier_brief(""), "药品到货");
+    }
+
+    #[test]
+    fn real_inbound_workbook_uses_business_date_and_correct_summary() {
+        let (config, _) = crate::core::config::load_config(None);
+        let output = std::env::temp_dir().join(format!(
+            "desktop_app_inbound_test_{}.xlsx",
+            std::process::id()
+        ));
+        let output_string = output.to_string_lossy().to_string();
+
+        let result = generate_inbound_voucher(
+            "../../西药-药品入库单.xlsx",
+            "../../石家庄心理医院_数量金额总账_20260907173619.xlsx",
+            "../../凭证导入模板-入库.xlsx",
+            Some(&output_string),
+            None,
+            None,
+            &config,
+        )
+        .expect("真实入库样例应能生成凭证");
+
+        assert_eq!(result.voucher_date, "2026-08-31");
+
+        let mut workbook = open_excel(&output).expect("应能重新打开生成的入库凭证");
+        let sheet_name = workbook
+            .sheet_names()
+            .first()
+            .cloned()
+            .expect("生成结果应包含凭证工作表");
+        let range = workbook
+            .worksheet_range(&sheet_name)
+            .expect("应能读取生成的凭证工作表");
+        for row in range.rows().skip(1) {
+            if row.len() > 5 {
+                assert_eq!(cell_as_string(&row[1]), "记");
+                assert!(cell_as_string(&row[2]).is_empty());
+                assert!(!cell_as_string(&row[5]).contains("到货到货"));
+            }
+        }
+
+        std::fs::remove_file(output).expect("应清理入库测试输出");
+    }
 }

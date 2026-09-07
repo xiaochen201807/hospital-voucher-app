@@ -42,6 +42,17 @@ const state = {
   auditDiffOnly: false
 };
 
+// HTML 转义防注入
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // UI 辅助工具函数：Toast 消息通知
 function showToast(message, type = 'info', duration = 3500) {
   const container = document.getElementById('toast-container');
@@ -49,7 +60,9 @@ function showToast(message, type = 'info', duration = 3500) {
 
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.innerHTML = `<span>${message}</span>`;
+  const messageEl = document.createElement('span');
+  messageEl.textContent = message;
+  toast.appendChild(messageEl);
   container.appendChild(toast);
 
   setTimeout(() => {
@@ -589,15 +602,15 @@ function renderOutboundResult(data) {
     unmatchedBox.classList.remove('hidden');
     unmatched.forEach(item => {
       const diag = diagnoseUnmatchedReason(item);
-      const drugDisplayName = item.name || item.target_name;
+      const drugDisplayName = item.name || item.target_name || '';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td style="font-weight: 600; color: #fff;">${drugDisplayName}</td>
-        <td>${item.spec || '-'}</td>
-        <td>${item.factory || '-'}</td>
-        <td style="font-family: monospace;">${item.qty}</td>
-        <td style="font-family: monospace;">${item.in_price !== null ? '¥ ' + item.in_price : '-'}</td>
-        <td><span class="diag-tag ${diag.type}">${diag.text}</span></td>
+        <td style="font-weight: 600; color: #fff;">${escapeHtml(drugDisplayName)}</td>
+        <td>${escapeHtml(item.spec || '-')}</td>
+        <td>${escapeHtml(item.factory || '-')}</td>
+        <td style="font-family: monospace;">${escapeHtml(item.qty)}</td>
+        <td style="font-family: monospace;">${item.in_price !== null ? '¥ ' + escapeHtml(item.in_price) : '-'}</td>
+        <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
         <td style="text-align: center;">
           <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
             + 配置编码
@@ -653,7 +666,7 @@ function initTabInbound() {
     if (!ledger) return showToast('请指定数量金额总账表', 'warning');
     if (!template) return showToast('请指定凭证导入模板', 'warning');
 
-    const voucherNo = inVoucherNo.value.trim() || '记';
+    const voucherNo = inVoucherNo.value.trim() || null;
     const dateVal = inDate.value.trim() || null;
 
     showLoading('正在解析入库单据、匹配供应商与存货编码并进行借贷平衡审计...');
@@ -732,10 +745,10 @@ function renderInboundResult(data) {
   (data.suppliers_summary || []).forEach(s => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td style="font-weight: 600; color: #fff;">${s.supplier}</td>
-      <td style="font-family: monospace; color: #38bdf8;">${s.code || '<span style="color:#f87171">未匹配编码</span>'}</td>
-      <td>${s.brief || '-'}</td>
-      <td style="font-family: monospace;">${s.count} 条</td>
+      <td style="font-weight: 600; color: #fff;">${escapeHtml(s.supplier)}</td>
+      <td style="font-family: monospace; color: #38bdf8;">${s.code ? escapeHtml(s.code) : '<span style="color:#f87171">未匹配编码</span>'}</td>
+      <td>${escapeHtml(s.brief || '-')}</td>
+      <td style="font-family: monospace;">${escapeHtml(s.count)} 条</td>
       <td style="font-family: monospace; font-weight: 700; color: #34d399;">${formatMoney(s.amount)}</td>
     `;
     supTbody.appendChild(tr);
@@ -753,16 +766,16 @@ function renderInboundResult(data) {
     unmatchedBox.classList.remove('hidden');
     unmatched.forEach(item => {
       const diag = diagnoseUnmatchedReason(item);
-      const drugDisplayName = item.target_name || item.name;
+      const drugDisplayName = item.target_name || item.name || '';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${item.supplier || '-'}</td>
-        <td style="font-weight: 600; color: #fbbf24;">${drugDisplayName}</td>
-        <td>${item.spec || '-'}</td>
-        <td style="font-family: monospace;">${item.qty}</td>
-        <td style="font-family: monospace;">¥ ${item.in_price}</td>
+        <td>${escapeHtml(item.supplier || '-')}</td>
+        <td style="font-weight: 600; color: #fbbf24;">${escapeHtml(drugDisplayName)}</td>
+        <td>${escapeHtml(item.spec || '-')}</td>
+        <td style="font-family: monospace;">${escapeHtml(item.qty)}</td>
+        <td style="font-family: monospace;">¥ ${escapeHtml(item.in_price)}</td>
         <td style="font-family: monospace; font-weight: 600;">${formatMoney(item.in_amt)}</td>
-        <td><span class="diag-tag ${diag.type}">${diag.text}</span></td>
+        <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
         <td style="text-align: center;">
           <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
             + 配置编码
@@ -825,8 +838,8 @@ function addVendorRowToTable(fullName = '', brief = '') {
   const vendorTbody = document.getElementById('vendor-mapping-table').querySelector('tbody');
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input type="text" class="form-input input-sm vendor-fullname" value="${fullName}" placeholder="单据中的厂家全称..." /></td>
-    <td><input type="text" class="form-input input-sm vendor-brief" value="${brief}" placeholder="总账规范简称..." /></td>
+    <td><input type="text" class="form-input input-sm vendor-fullname" value="${escapeHtml(fullName)}" placeholder="单据中的厂家全称..." /></td>
+    <td><input type="text" class="form-input input-sm vendor-brief" value="${escapeHtml(brief)}" placeholder="总账规范简称..." /></td>
     <td style="text-align: center;">
       <button class="btn btn-danger-outline btn-xs btn-delete-row">删除</button>
     </td>
@@ -842,7 +855,7 @@ function renderStrictDrugsTags(drugsList) {
     const tag = document.createElement('span');
     tag.className = 'drug-tag';
     tag.innerHTML = `
-      <span>${drug}</span>
+      <span>${escapeHtml(drug)}</span>
       <span class="tag-remove" title="移除此项">×</span>
     `;
     tag.querySelector('.tag-remove').onclick = () => {
@@ -856,8 +869,8 @@ function addOverrideRowToTable(drugName = '', code = '') {
   const tbody = document.getElementById('overrides-table').querySelector('tbody');
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input type="text" class="form-input input-sm override-key" value="${drugName}" placeholder="药品目标名..." /></td>
-    <td><input type="text" class="form-input input-sm override-val" value="${code}" placeholder="科目编码 (留空置空)" /></td>
+    <td><input type="text" class="form-input input-sm override-key" value="${escapeHtml(drugName)}" placeholder="药品目标名..." /></td>
+    <td><input type="text" class="form-input input-sm override-val" value="${escapeHtml(code)}" placeholder="科目编码 (留空置空)" /></td>
     <td style="text-align: center;">
       <button class="btn btn-danger-outline btn-xs btn-delete-override">删除</button>
     </td>
@@ -885,7 +898,7 @@ function initTabConfig() {
     const tag = document.createElement('span');
     tag.className = 'drug-tag';
     tag.innerHTML = `
-      <span>${val}</span>
+      <span>${escapeHtml(val)}</span>
       <span class="tag-remove" title="移除">×</span>
     `;
     tag.querySelector('.tag-remove').onclick = () => tag.remove();
@@ -1214,16 +1227,16 @@ function renderCompareTable() {
     const diffAmtColor = r.diff_amt !== 0 ? (r.diff_amt > 0 ? '#f87171' : '#38bdf8') : 'inherit';
 
     tr.innerHTML = `
-      <td><span class="cat-pill" style="padding: 2px 8px; font-size: 11px;">${r.category}</span></td>
+      <td><span class="cat-pill" style="padding: 2px 8px; font-size: 11px;">${escapeHtml(r.category)}</span></td>
       <td>${statusTag}</td>
-      <td style="font-weight: 600; color: #fff;">${r.name}</td>
-      <td>${r.spec || '-'}</td>
-      <td style="color: var(--text-muted); font-size: 12px;">${r.factory || '-'}</td>
-      <td style="text-align: center;">${r.unit || '-'}</td>
-      <td style="font-family: monospace; color: #38bdf8;">${r.ledger_code || '-'}</td>
+      <td style="font-weight: 600; color: #fff;">${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(r.spec || '-')}</td>
+      <td style="color: var(--text-muted); font-size: 12px;">${escapeHtml(r.factory || '-')}</td>
+      <td style="text-align: center;">${escapeHtml(r.unit || '-')}</td>
+      <td style="font-family: monospace; color: #38bdf8;">${escapeHtml(r.ledger_code || '-')}</td>
       <td style="text-align: right; font-family: monospace;">${r.ledger_qty?.toLocaleString() ?? 0}</td>
       <td style="text-align: right; font-family: monospace;">${r.wh_qty?.toLocaleString() ?? 0}</td>
-      <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffQtyColor};">${diffQtyFormatted}</td>
+      <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffQtyColor};">${escapeHtml(diffQtyFormatted)}</td>
       <td style="text-align: right; font-family: monospace;">${formatMoney(r.ledger_amt)}</td>
       <td style="text-align: right; font-family: monospace;">${formatMoney(r.wh_amt)}</td>
       <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffAmtColor};">${formatMoney(r.diff_amt)}</td>
@@ -1303,4 +1316,3 @@ window.addEventListener('DOMContentLoaded', async () => {
   loadConfigData();
   triggerFileScan();
 });
-

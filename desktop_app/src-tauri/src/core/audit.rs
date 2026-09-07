@@ -155,8 +155,8 @@ fn audit_single_category(
             let l_qty = m.end_qty;
             let l_price = m.price;
             let l_amt = (l_qty * l_price * 100.0).round() / 100.0;
-            let diff_qty = (l_qty - w.qty * 100.0).round() / 100.0;
-            let diff_amt = (l_amt - w.amount * 100.0).round() / 100.0;
+            let diff_qty = ((l_qty - w.qty) * 100.0).round() / 100.0;
+            let diff_amt = ((l_amt - w.amount) * 100.0).round() / 100.0;
 
             let (status, status_desc) = if diff_qty.abs() < 0.001 {
                 ("EQUAL".to_string(), "数量完全吻合".to_string())
@@ -452,8 +452,8 @@ pub fn run_inventory_audit(
         ws_dash.write_string_with_format(2, c as u16, *h, &fmt_header).map_err(|e| e.to_string())?;
     }
 
-    let mut row_d = 3;
-    for cat in &categories {
+    for (idx, cat) in categories.iter().enumerate() {
+        let row_d = (3 + idx) as u32;
         ws_dash.write_string_with_format(row_d, 0, &cat.category, &fmt_cell_center).map_err(|e| e.to_string())?;
         ws_dash.write_number_with_format(row_d, 1, cat.summary.total_items as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
         ws_dash.write_number_with_format(row_d, 2, cat.summary.equal_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
@@ -462,7 +462,6 @@ pub fn run_inventory_audit(
         ws_dash.write_number_with_format(row_d, 5, cat.summary.wh_only_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
         ws_dash.write_number_with_format(row_d, 6, cat.summary.match_rate / 100.0, &fmt_rate).map_err(|e| e.to_string())?;
         ws_dash.write_number_with_format(row_d, 7, cat.summary.total_diff_amt, &fmt_money).map_err(|e| e.to_string())?;
-        row_d += 1;
     }
 
     for c in 0..8 {
