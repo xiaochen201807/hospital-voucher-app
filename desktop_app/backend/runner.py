@@ -17,12 +17,16 @@ import json
 import argparse
 import glob
 
-# 将父目录加入 sys.path，以便直接调用现有的核心业务模块
+# 智能判定运行根目录（兼容 PyInstaller 独立二进制与开发调试）
+IS_FROZEN = getattr(sys, 'frozen', False)
+BASE_DIR = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(__file__)))
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if PARENT_DIR not in sys.path:
-    sys.path.insert(0, PARENT_DIR)
 
-# 显式导入 Excel 处理库，确保 PyInstaller 单文件打包能自动分析收集
+for d in [BASE_DIR, PARENT_DIR, os.path.abspath(os.path.dirname(__file__)), os.getcwd()]:
+    if d and os.path.exists(d) and d not in sys.path:
+        sys.path.insert(0, d)
+
+# 显式导入 Excel 处理库
 try:
     import openpyxl
     import xlrd
@@ -32,15 +36,21 @@ try:
 except ImportError:
     pass
 
+# 显式导入核心业务模块（逐一导入，避免连锁失效）
 try:
     import process_sales
+except Exception as e:
+    print(f"[Warning] 导入 process_sales 异常: {e}", file=sys.stderr)
+
+try:
     import generate_voucher
+except Exception as e:
+    print(f"[Warning] 导入 generate_voucher 异常: {e}", file=sys.stderr)
+
+try:
     import generate_inbound_voucher
-except ImportError as e:
-    # 兼容直接从当前目录执行
-    CURR_DIR = os.path.abspath(os.path.dirname(__file__))
-    if CURR_DIR not in sys.path:
-        sys.path.insert(0, CURR_DIR)
+except Exception as e:
+    print(f"[Warning] 导入 generate_inbound_voucher 异常: {e}", file=sys.stderr)
 
 
 def cmd_scan(args):
@@ -76,8 +86,25 @@ def cmd_scan(args):
     return {'success': True, 'data': res}
 
 
+def find_config_path(custom_path=None):
+    """智能查找 factory_mapping.json 配置文件路径"""
+    if custom_path and os.path.exists(custom_path):
+        return custom_path
+    for p in [
+        os.path.join(os.getcwd(), 'factory_mapping.json'),
+        os.path.join(BASE_DIR, 'factory_mapping.json'),
+        os.path.join(PARENT_DIR, 'factory_mapping.json'),
+    ]:
+        if os.path.exists(p):
+            return os.path.abspath(p)
+    return os.path.abspath(os.path.join(BASE_DIR, 'factory_mapping.json'))
+
+
 def cmd_process_sales(args):
     """执行销售汇总去重处理"""
+    if 'process_sales' not in globals() or process_sales is None:
+        return {'success': False, 'error': "核心模块 process_sales 加载失败，请检查安装包完整性"}
+
     sales_file = args.file
     if not sales_file or not os.path.exists(sales_file):
         return {'success': False, 'error': f"销售表文件 '{sales_file}' 不存在"}
@@ -112,10 +139,13 @@ def cmd_process_sales(args):
 
 def cmd_generate_voucher(args):
     """执行销售出库凭证生成"""
+    if 'generate_voucher' not in globals() or generate_voucher is None:
+        return {'success': False, 'error': "核心模块 generate_voucher 加载失败，请检查安装包完整性"}
+
     sales_file = args.sales
     ledger_file = args.ledger
     template_file = args.template
-    config_file = args.config or os.path.join(PARENT_DIR, 'factory_mapping.json')
+    config_file = find_config_path(args.config)
 
     if not sales_file or not os.path.exists(sales_file):
         return {'success': False, 'error': f"销售明细表 '{sales_file}' 不存在"}
@@ -190,10 +220,13 @@ def cmd_generate_voucher(args):
 
 def cmd_generate_inbound_voucher(args):
     """执行药品入库凭证生成 (西药/中药)"""
+    if 'generate_inbound_voucher' not in globals() or generate_inbound_voucher is None:
+        return {'success': False, 'error': "核心模块 generate_inbound_voucher 加载失败，请检查安装包完整性"}
+
     inbound_file = args.inbound
     ledger_file = args.ledger
     template_file = args.template
-    config_file = args.config or os.path.join(PARENT_DIR, 'factory_mapping.json')
+    config_file = find_config_path(args.config)
 
     if not inbound_file or not os.path.exists(inbound_file):
         return {'success': False, 'error': f"入库单文件 '{inbound_file}' 不存在"}

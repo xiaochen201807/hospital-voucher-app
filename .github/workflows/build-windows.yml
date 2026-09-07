@@ -34,12 +34,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path "desktop_app/src-tauri/resources"
           pyinstaller --onefile --noconsole --name runner `
             --distpath "desktop_app/src-tauri/resources" `
+            --paths "." `
+            --paths "desktop_app/backend" `
             --hidden-import xlrd `
             --hidden-import xlwt `
             --hidden-import xlutils `
             --hidden-import xlutils.copy `
             --hidden-import openpyxl `
             --hidden-import pandas `
+            --hidden-import process_sales `
+            --hidden-import generate_voucher `
+            --hidden-import generate_inbound_voucher `
             --add-data "process_sales.py;." `
             --add-data "generate_voucher.py;." `
             --add-data "generate_inbound_voucher.py;." `
@@ -49,6 +54,8 @@ jobs:
           if (Test-Path "desktop_app/src-tauri/resources/runner.exe") {
             Write-Host ">>> runner.exe successfully built!" -ForegroundColor Green
             Copy-Item "desktop_app/src-tauri/resources/runner.exe" -Destination "desktop_app/backend/runner.exe" -Force
+            # 运行冒烟自测
+            & "desktop_app/src-tauri/resources/runner.exe" scan
           } else {
             Write-Error "runner.exe failed to build!"
             exit 1
