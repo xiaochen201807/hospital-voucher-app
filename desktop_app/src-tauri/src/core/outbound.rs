@@ -1,7 +1,8 @@
 use crate::core::config::{clean_text, ConfigData};
 use crate::core::excel_utils::{
-    collect_source_dates, find_header_row, is_summary_row, optional_col, read_sheet_rows,
-    required_col, row_as_f64, row_as_string,
+    cents_to_currency, collect_source_dates, currency_cents, find_header_row, is_effectively_zero,
+    is_summary_row, optional_col, read_sheet_rows, required_col, round_currency, row_as_f64,
+    row_as_string,
 };
 use crate::core::voucher_writer::{
     copy_template_sheets, load_template_sheets, set_default_voucher_column_widths,
@@ -9,6 +10,7 @@ use crate::core::voucher_writer::{
 };
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // 保留旧的模块路径，避免外部调用方因公共类型迁移而立即失效。
@@ -17,6 +19,53 @@ pub use crate::core::matching::{
     extract_name_and_vendor_tag, match_drug, match_drug_with_method, strip_tcm_prefix,
 };
 pub use crate::core::models::{LedgerEntry, UnmatchedDrug};
+
+/// 计算销售出库的基础单价。
+///
+/// 期末数量为 0 时仍按正常单价计算本次出库金额；该科目期末金额中的历史尾差
+/// 由 `apply_zero_ending_tails` 摊到该科目的最后一笔出库明细，不能把整笔出库金额清零。
+fn effective_outbound_unit_price(
+    ledger_entry: &LedgerEntry,
+    sales_price: f64,
+    fallback_price: bool,
+) -> f64 {
+    if ledger_entry.price > 0.0 {
+        ledger_entry.price
+    } else if fallback_price {
+        sales_price
+    } else {
+        0.0
+    }
+}
+
+#[derive(Debug)]
+struct OutboundDetailLine {
+    aux_code: String,
+    qty: f64,
+    unit_price: f64,
+    amount_cents: i64,
+}
+
+fn apply_zero_ending_tails(
+    lines: &mut [OutboundDetailLine],
+    tails_by_aux_code: &HashMap<String, i64>,
+) -> i64 {
+    let mut last_line_by_aux_code = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.aux_code.is_empty() && !is_effectively_zero(line.qty) {
+            last_line_by_aux_code.insert(line.aux_code.clone(), index);
+        }
+    }
+
+    let mut applied_cents = 0_i64;
+    for (aux_code, tail_cents) in tails_by_aux_code {
+        if let Some(index) = last_line_by_aux_code.get(aux_code) {
+            lines[*index].amount_cents += *tail_cents;
+            applied_cents += *tail_cents;
+        }
+    }
+    applied_cents
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutboundVoucherResult {
@@ -95,30 +144,13 @@ pub fn generate_outbound_voucher(
     let formats = VoucherFormats::new("#,##0");
     write_voucher_headers(ws_voucher, &formats)?;
 
-    // 第 1 行 (分录序号 1): 借方待填空行
-    let opening_line = VoucherLine {
-        date: &voucher_date,
-        voucher_no: None,
-        seq: 1,
-        summary: None,
-        subject_code: None,
-        debit_amount: None,
-        credit_amount: None,
-        supplier_code: None,
-        inventory_code: None,
-        qty: None,
-        price: None,
-        original_amount: None,
-    };
-    write_voucher_line(ws_voucher, 1, &opening_line, &formats)?;
-
-    // 逐行匹配并填充贷方明细行 (分录序号从 2 递增)
+    // 逐行匹配贷方明细。先暂存明细，待全部行匹配完成后，才能把每个零结存科目
+    // 的尾差准确摊到该科目的最后一笔出库商品。
     let mut matched_count = 0;
     let mut unmatched_items = Vec::new();
-    let mut total_credit_amt = 0.0;
     let mut total_qty = 0.0;
-    let mut current_row: u32 = 2;
-    let mut entry_seq = 2;
+    let mut detail_lines = Vec::new();
+    let mut tails_by_aux_code = HashMap::new();
 
     for row in rows.iter().skip(h_idx + 1) {
         if row.is_empty() {
@@ -140,13 +172,10 @@ pub fn generate_outbound_voucher(
 
         let (aux_code, unit_price) = if let Some(m) = matched {
             matched_count += 1;
-            let p = if m.price > 0.0 {
-                m.price
-            } else if fallback_price {
-                raw_price
-            } else {
-                0.0
-            };
+            let p = effective_outbound_unit_price(&m, raw_price, fallback_price);
+            if is_effectively_zero(m.end_qty) && !m.aux_code.is_empty() {
+                tails_by_aux_code.insert(m.aux_code.clone(), currency_cents(m.end_amount));
+            }
             (m.aux_code, p)
         } else {
             let reason = if config
@@ -158,7 +187,7 @@ pub fn generate_outbound_voucher(
             } else {
                 "总账中未检索到匹配的存货科目编码".to_string()
             };
-            let amt = (qty * raw_price * 100.0).round() / 100.0;
+            let amt = round_currency(qty * raw_price);
             unmatched_items.push(UnmatchedDrug {
                 name: name.clone(),
                 target_name: name.clone(),
@@ -176,28 +205,56 @@ pub fn generate_outbound_voucher(
             (String::new(), p)
         };
 
-        let credit_amt = (qty * unit_price * 100.0).round() / 100.0;
-        total_credit_amt += credit_amt;
+        detail_lines.push(OutboundDetailLine {
+            aux_code,
+            qty,
+            unit_price,
+            amount_cents: currency_cents(qty * unit_price),
+        });
+    }
 
+    // 对每个期末数量为 0 的存货，只在该存货最后一笔出库明细上处理期末历史尾差，
+    // 不影响该存货前面的正常出库金额。
+    apply_zero_ending_tails(&mut detail_lines, &tails_by_aux_code);
+    let total_credit_cents: i64 = detail_lines.iter().map(|line| line.amount_cents).sum();
+    let total_credit_amt = cents_to_currency(total_credit_cents);
+
+    for (index, detail) in detail_lines.iter().enumerate() {
+        let credit_amt = cents_to_currency(detail.amount_cents);
         let line = VoucherLine {
             date: &voucher_date,
             voucher_no: None,
-            seq: entry_seq,
+            seq: (index + 2) as u32,
             summary: None,
             subject_code: None,
             debit_amount: None,
             credit_amount: Some(credit_amt),
             supplier_code: None,
-            inventory_code: (!aux_code.is_empty()).then_some(aux_code.as_str()),
-            qty: Some(qty),
-            price: Some(unit_price),
+            inventory_code: (!detail.aux_code.is_empty()).then_some(detail.aux_code.as_str()),
+            qty: Some(detail.qty),
+            price: Some(detail.unit_price),
             original_amount: Some(credit_amt),
         };
-        write_voucher_line(ws_voucher, current_row, &line, &formats)?;
-
-        current_row += 1;
-        entry_seq += 1;
+        write_voucher_line(ws_voucher, (index + 2) as u32, &line, &formats)?;
     }
+
+    // 第 1 行 (分录序号 1): 借方平衡行。科目仍由财务按业务性质填写，金额自动
+    // 等于所有贷方明细按分取整后的合计，避免尾差导致导入凭证借贷不平。
+    let opening_line = VoucherLine {
+        date: &voucher_date,
+        voucher_no: None,
+        seq: 1,
+        summary: None,
+        subject_code: None,
+        debit_amount: Some(total_credit_amt),
+        credit_amount: None,
+        supplier_code: None,
+        inventory_code: None,
+        qty: None,
+        price: None,
+        original_amount: None,
+    };
+    write_voucher_line(ws_voucher, 1, &opening_line, &formats)?;
 
     set_default_voucher_column_widths(ws_voucher, &[(0, 14.0), (9, 15.0), (15, 14.0), (23, 15.0)])?;
     copy_template_sheets(&mut wb_out, &tmpl_sheets)?;
@@ -214,7 +271,7 @@ pub fn generate_outbound_voucher(
         .save(&out_path_buf)
         .map_err(|e| format!("保存出库凭证 Excel 失败: {}", e))?;
 
-    let total_items = (entry_seq - 2) as usize;
+    let total_items = detail_lines.len();
     let match_rate = if total_items > 0 {
         ((matched_count as f64 / total_items as f64) * 1000.0).round() / 10.0
     } else {
@@ -229,8 +286,8 @@ pub fn generate_outbound_voucher(
         matched_count,
         unmatched_count: unmatched_items.len(),
         match_rate,
-        total_qty: (total_qty * 100.0).round() / 100.0,
-        total_credit_amt: (total_credit_amt * 100.0).round() / 100.0,
+        total_qty: round_currency(total_qty),
+        total_credit_amt,
         unmatched_items,
         error: None,
     })
@@ -239,6 +296,7 @@ pub fn generate_outbound_voucher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use calamine::Reader;
 
     fn project_file(name: &str) -> String {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -257,7 +315,66 @@ mod tests {
             spec: spec.to_string(),
             price: 1.0,
             end_qty: 1.0,
+            end_amount: 0.0,
         }
+    }
+
+    #[test]
+    fn zero_ending_quantity_keeps_base_price_and_records_tail() {
+        let mut entry = ledger_entry("阿莫西林", "0.25g*24粒/盒");
+        entry.end_qty = 0.0;
+        entry.price = 0.42;
+        entry.end_amount = 5.21;
+
+        let unit_price = effective_outbound_unit_price(&entry, 0.18, true);
+        assert_eq!(unit_price, 0.42);
+
+        let mut lines = vec![OutboundDetailLine {
+            aux_code: entry.aux_code.clone(),
+            qty: 100.0,
+            unit_price,
+            amount_cents: currency_cents(100.0 * unit_price),
+        }];
+        let tails = HashMap::from([(entry.aux_code.clone(), currency_cents(entry.end_amount))]);
+        let applied = apply_zero_ending_tails(&mut lines, &tails);
+
+        assert_eq!(applied, 521);
+        assert_eq!(lines[0].amount_cents, 4721);
+    }
+
+    #[test]
+    fn zero_ending_tail_is_applied_only_to_the_last_outbound_line() {
+        let aux_code = "TEST".to_string();
+        let mut lines = vec![
+            OutboundDetailLine {
+                aux_code: aux_code.clone(),
+                qty: 3.0,
+                unit_price: 1.0,
+                amount_cents: 300,
+            },
+            OutboundDetailLine {
+                aux_code: aux_code.clone(),
+                qty: 2.0,
+                unit_price: 1.0,
+                amount_cents: 200,
+            },
+        ];
+        let tails = HashMap::from([(aux_code, 7_i64)]);
+
+        assert_eq!(apply_zero_ending_tails(&mut lines, &tails), 7);
+        assert_eq!(lines[0].amount_cents, 300);
+        assert_eq!(lines[1].amount_cents, 207);
+    }
+
+    #[test]
+    fn tiny_ending_quantity_residual_also_receives_tail() {
+        let mut entry = ledger_entry("阿莫西林", "0.25g*24粒/盒");
+        entry.end_qty = -1e-10;
+        entry.price = 0.42;
+        entry.end_amount = -0.1;
+
+        assert_eq!(effective_outbound_unit_price(&entry, 0.18, true), 0.42);
+        assert_eq!(currency_cents(entry.end_amount), -10);
     }
 
     #[test]
@@ -350,6 +467,29 @@ mod tests {
 
         assert_eq!(result.voucher_date, "2026-08-31");
         assert!(output.exists());
+
+        let mut output_wb =
+            crate::core::excel_utils::open_excel(&output).expect("生成文件应能重新打开");
+        let output_range = output_wb
+            .worksheet_range("凭证模版")
+            .expect("生成文件应包含凭证模版工作表");
+        let output_rows: Vec<_> = output_range.rows().collect();
+        let debit_cents = output_rows
+            .get(1)
+            .and_then(|row| row.get(8))
+            .map(crate::core::excel_utils::cell_as_f64)
+            .map(currency_cents)
+            .unwrap_or_default();
+        let credit_cents: i64 = output_rows
+            .iter()
+            .skip(2)
+            .filter_map(|row| row.get(9))
+            .map(crate::core::excel_utils::cell_as_f64)
+            .map(currency_cents)
+            .sum();
+
+        assert_eq!(debit_cents, currency_cents(result.total_credit_amt));
+        assert_eq!(debit_cents, credit_cents);
         std::fs::remove_file(output).expect("应清理出库测试输出");
     }
 }

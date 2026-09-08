@@ -36,9 +36,11 @@ pub fn load_ledger_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, Strin
         let drug_name = name_parts.next().unwrap_or_default().to_string();
         let spec = name_parts.next().unwrap_or_default().to_string();
 
-        // 结存数量为第 17 列，期末单价为第 18 列，期初单价为第 6 列。
+        // 结存数量为第 17 列，期末单价为第 18 列，期末金额为第 19 列，
+        // 期初单价为第 6 列。
         let end_qty = row.get(16).map(cell_as_f64).unwrap_or(0.0);
         let end_price = row.get(17).map(cell_as_f64).unwrap_or(0.0);
+        let end_amount = row.get(18).map(cell_as_f64).unwrap_or(0.0);
         let init_price = row.get(5).map(cell_as_f64).unwrap_or(0.0);
         let price = if end_price > 0.0 {
             end_price
@@ -56,6 +58,7 @@ pub fn load_ledger_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, Strin
             spec,
             price,
             end_qty,
+            end_amount,
         });
     }
 

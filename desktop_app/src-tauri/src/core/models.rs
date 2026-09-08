@@ -12,6 +12,7 @@ pub struct LedgerEntry {
     pub spec: String,
     pub price: f64,
     pub end_qty: f64,
+    pub end_amount: f64,
 }
 
 /// 生成凭证时无法匹配总账科目的明细。

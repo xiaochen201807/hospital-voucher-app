@@ -125,13 +125,38 @@ pub fn row_as_f64(row: &[Data], col: usize) -> f64 {
     row.get(col).map(cell_as_f64).unwrap_or(0.0)
 }
 
+/// 将金额统一按人民币分（两位小数）取整。
+pub fn round_currency(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    (value * 100.0).round() / 100.0
+}
+
+/// 将金额转换为分，供凭证合计使用，避免逐笔金额相加时累积浮点误差。
+pub fn currency_cents(value: f64) -> i64 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value * 100.0).round() as i64
+}
+
+pub fn cents_to_currency(value: i64) -> f64 {
+    value as f64 / 100.0
+}
+
+/// 判断数量是否可以视为 0，兼容 Excel 浮点读取产生的极小残差。
+pub fn is_effectively_zero(value: f64) -> bool {
+    value.abs() < 1e-9
+}
+
 pub fn is_summary_row(name: &str) -> bool {
     name.is_empty() || name.contains("合计") || name.contains("总计")
 }
 
 pub fn amount_or_product(amount: f64, qty: f64, price: f64) -> f64 {
     if amount == 0.0 && qty > 0.0 && price > 0.0 {
-        (qty * price * 100.0).round() / 100.0
+        round_currency(qty * price)
     } else {
         amount
     }
@@ -229,6 +254,20 @@ mod tests {
     fn amount_falls_back_to_quantity_times_price() {
         assert_eq!(amount_or_product(0.0, 3.0, 1.234), 3.70);
         assert_eq!(amount_or_product(9.99, 3.0, 1.234), 9.99);
+    }
+
+    #[test]
+    fn currency_totals_are_accumulated_in_cents() {
+        let cents = currency_cents(3.0 * 1.234) + currency_cents(2.0 * 0.567);
+        assert_eq!(cents_to_currency(cents), 4.83);
+        assert_eq!(round_currency(4.236), 4.24);
+    }
+
+    #[test]
+    fn tiny_quantity_residual_is_treated_as_zero() {
+        assert!(is_effectively_zero(0.0));
+        assert!(is_effectively_zero(-1e-10));
+        assert!(!is_effectively_zero(1e-6));
     }
 
     #[test]
