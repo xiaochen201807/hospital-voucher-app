@@ -245,14 +245,17 @@ def load_ledger_and_aux_data(ledger_file, template_file):
         # 提取辅助核算编码 (例如 1201_XY0001 -> XY0001)
         aux_code = c1.split('_')[-1] if '_' in c1 else c1
 
-        # 提取单价 (优先 Col 6 期初单价，其次 Col 18 期末单价)
-        price_val = s_ledger.cell(r, 6).value
-        if price_val is None:
-            price_val = s_ledger.cell(r, 18).value
-        try:
-            price = float(price_val) if price_val is not None and price_val != '' else None
-        except (ValueError, TypeError):
-            price = None
+        # 提取单价 (优先取第 18 列【期末结存单价】，其次取第 6 列【期初单价】)
+        def parse_price(val):
+            try:
+                p = float(val) if val is not None and str(val).strip() != '' else 0.0
+                return p if p > 0.0 else None
+            except (ValueError, TypeError):
+                return None
+
+        price = parse_price(s_ledger.cell(r, 18).value)
+        if price is None:
+            price = parse_price(s_ledger.cell(r, 6).value)
 
         item_info = {
             'subject_code': c1,

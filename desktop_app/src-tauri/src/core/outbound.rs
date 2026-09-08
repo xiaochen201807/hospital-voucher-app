@@ -80,9 +80,18 @@ pub fn load_ledger_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, Strin
         let drug_name = parts[0].to_string();
         let spec = if parts.len() > 1 { parts[1].to_string() } else { String::new() };
 
-        // 结存数量位于第 17 列 (0-indexed: 16)，单价位于第 18 列 (17)
+        // 结存数量位于第 17 列 (0-indexed: 16)
+        // 单价：优先取第 18 列【期末结存单价】(0-indexed: 17)，其次取第 6 列【期初单价】(0-indexed: 5)
         let end_qty = if row.len() > 16 { cell_as_f64(&row[16]) } else { 0.0 };
-        let price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
+        let end_price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
+        let init_price = if row.len() > 5 { cell_as_f64(&row[5]) } else { 0.0 };
+        let price = if end_price > 0.0 {
+            end_price
+        } else if init_price > 0.0 {
+            init_price
+        } else {
+            0.0
+        };
 
         entries.push(LedgerEntry {
             code,
