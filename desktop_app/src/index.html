@@ -615,17 +615,82 @@
                 </div>
               </div>
 
-              <!-- 执行按钮区 -->
+              <!-- 执行按钮区 (两步流) -->
               <div class="form-actions" style="margin-top: 20px;">
                 <button id="btn-run-compare" class="btn btn-primary btn-lg">
                   <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
-                    <polygon points="5 3 19 12 5 21 5 3" />
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
-                  <span>开始账实多库智能核对</span>
+                  <span>第一步：智能识别多库映射关系</span>
                 </button>
                 <div class="form-hints">
-                  <span>💡 提示：系统支持西药、中药、耗材同时比对或任意单库独立比对；自动剥离库管末尾合计行与厂家括号别名。</span>
+                  <span>💡 提示：系统将运用增强算法自动匹配库管与财务存货科目，识别项将<b>默认全部自动勾选</b>，由您确认后再生成核对报告。</span>
                 </div>
+              </div>
+            </div>
+
+            <!-- 第一步：智能映射预览与人工确认卡片 -->
+            <div id="compare-preview-card" class="card result-card hidden" style="margin-top: 20px;">
+              <div class="result-header" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                  <div class="result-status">
+                    <div class="status-badge info" id="compare-preview-badge">智能识别完成</div>
+                    <div class="output-path-info">
+                      <span>识别统计：共 <strong id="preview-total-count" style="color:#fff;">0</strong> 个在库品规，已自动匹配 <strong id="preview-matched-count" style="color:#10b981;">0</strong> 个 (<strong id="preview-rate-text" style="color:#10b981;">0.0%</strong>)，未自动匹配 <strong id="preview-unmatched-count" style="color:#f59e0b;">0</strong> 个。</span>
+                    </div>
+                  </div>
+                  <div class="result-actions" style="display: flex; gap: 10px;">
+                    <button id="btn-preview-select-all" class="btn btn-outline btn-sm">全选</button>
+                    <button id="btn-preview-deselect-all" class="btn btn-outline btn-sm">取消全选</button>
+                    <button id="btn-confirm-and-run-compare" class="btn btn-primary btn-sm" style="background: linear-gradient(135deg, #10b981, #059669);">
+                      <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                      <span>第二步：确认匹配，生成核对报告</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- 筛选与搜索工具条 -->
+                <div class="preview-filter-bar" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div class="category-tabs" id="preview-cat-tabs">
+                    <button class="cat-pill active" data-cat="ALL">全部库房</button>
+                    <button class="cat-pill" data-cat="西药房">西药房</button>
+                    <button class="cat-pill" data-cat="中药房">中药房</button>
+                    <button class="cat-pill" data-cat="耗材库">耗材库</button>
+                  </div>
+                  <div style="display: flex; gap: 16px; align-items: center;">
+                    <label class="filter-checkbox-label" style="cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 13px;">
+                      <input type="checkbox" id="chk-preview-unmatched-only" />
+                      <span>仅看未自动匹配项</span>
+                    </label>
+                    <input type="text" id="input-preview-search" class="form-input" style="width: 180px; padding: 4px 10px; font-size: 12px;" placeholder="快速搜索品名/厂家..." />
+                  </div>
+                </div>
+              </div>
+
+              <!-- 映射对照列表 -->
+              <div class="table-container" style="max-height: 520px; overflow-y: auto;">
+                <table class="data-table" id="compare-preview-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 40px; text-align: center;"><input type="checkbox" id="th-chk-all" checked title="全选/全不选" /></th>
+                      <th style="width: 65px;">库房</th>
+                      <th style="width: 150px;">库管在库药品/物资</th>
+                      <th style="width: 100px;">规格</th>
+                      <th style="width: 130px;">生产厂家</th>
+                      <th style="width: 80px; text-align: right;">在库数量</th>
+                      <th style="width: 30px; text-align: center;">➔</th>
+                      <th style="width: 120px;">匹配财务存货编码</th>
+                      <th style="width: 200px;">关联财务科目名称</th>
+                      <th style="width: 80px; text-align: right;">财务结存</th>
+                      <th style="width: 140px;">智能匹配依据</th>
+                      <th style="width: 140px; text-align: center;">人工调整/指定</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
               </div>
             </div>
 

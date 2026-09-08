@@ -1,6 +1,6 @@
-use crate::core::config::ConfigData;
+use crate::core::config::{clean_text, ConfigData};
 use crate::core::excel_utils::{cell_as_f64, cell_as_string, find_col_idx, open_excel};
-use crate::core::outbound::{match_drug, LedgerEntry};
+use crate::core::outbound::{match_drug_with_method, LedgerEntry};
 use calamine::Reader;
 use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
@@ -57,14 +57,75 @@ pub struct OverallAuditResult {
 }
 
 #[derive(Debug, Clone)]
-struct WarehouseItem {
-    name: String,
-    spec: String,
-    factory: String,
-    unit: String,
-    qty: f64,
-    price: f64,
-    amount: f64,
+pub struct WarehouseItem {
+    pub name: String,
+    pub spec: String,
+    pub factory: String,
+    pub unit: String,
+    pub qty: f64,
+    pub price: f64,
+    pub amount: f64,
+}
+
+/// 供前端手动下拉选择的候选总账条目
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LedgerCandidateOption {
+    pub code: String,
+    pub name: String,
+    pub spec: String,
+    pub qty: f64,
+    pub price: f64,
+}
+
+/// 第一步：智能识别映射项（前端预览与确认）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuditMappingItem {
+    pub id: usize,
+    pub category: String, // "西药房", "中药房", "耗材库"
+    pub wh_name: String,
+    pub wh_spec: String,
+    pub wh_factory: String,
+    pub wh_unit: String,
+    pub wh_qty: f64,
+    pub wh_price: f64,
+    pub wh_amount: f64,
+    pub matched: bool,
+    pub checked: bool, // 自动识别后默认自动勾选上！
+    pub match_method: String,
+    pub ledger_code: String,
+    pub ledger_name: String,
+    pub ledger_qty: f64,
+    pub ledger_price: f64,
+    pub ledger_amount: f64,
+    pub candidates: Vec<LedgerCandidateOption>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuditMappingPreviewResult {
+    pub success: bool,
+    pub total_items: usize,
+    pub matched_count: usize,
+    pub unmatched_count: usize,
+    pub match_rate: f64,
+    pub items: Vec<AuditMappingItem>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// 前端用户确认后的映射关系项
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConfirmedAuditMappingItem {
+    pub id: usize,
+    pub category: String,
+    pub wh_name: String,
+    pub wh_spec: String,
+    pub wh_factory: String,
+    pub wh_unit: String,
+    pub wh_qty: f64,
+    pub wh_price: f64,
+    pub wh_amount: f64,
+    pub checked: bool,
+    pub ledger_code: String,
 }
 
 /// 读取库管系统报表（西药、中药、耗材）
@@ -136,145 +197,10 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
     Ok(items)
 }
 
-/// 执行单库比对
-fn audit_single_category(
-    category_name: &str,
-    ledger_entries: &[LedgerEntry],
-    wh_items: &[WarehouseItem],
-    config: &ConfigData,
-) -> CategoryAuditResult {
-    let mut records = Vec::new();
-    let mut matched_ledger_codes = HashSet::new();
-
-    // 1. 遍历库管在库品规，匹配财务总账
-    for w in wh_items {
-        let matched = match_drug(&w.name, &w.spec, &w.factory, ledger_entries, config);
-
-        if let Some(m) = matched {
-            matched_ledger_codes.insert(m.code.clone());
-            let l_qty = m.end_qty;
-            let l_price = m.price;
-            let l_amt = (l_qty * l_price * 100.0).round() / 100.0;
-            let diff_qty = ((l_qty - w.qty) * 100.0).round() / 100.0;
-            let diff_amt = ((l_amt - w.amount) * 100.0).round() / 100.0;
-
-            let (status, status_desc) = if diff_qty.abs() < 0.001 {
-                ("EQUAL".to_string(), "数量完全吻合".to_string())
-            } else {
-                ("DIFF_QTY".to_string(), "存在数量差异".to_string())
-            };
-
-            records.push(AuditRecord {
-                category: category_name.to_string(),
-                status,
-                status_desc,
-                name: w.name.clone(),
-                spec: w.spec.clone(),
-                factory: w.factory.clone(),
-                unit: w.unit.clone(),
-                ledger_code: m.code.clone(),
-                ledger_name: m.name_full.clone(),
-                ledger_qty: l_qty,
-                wh_qty: w.qty,
-                diff_qty,
-                ledger_price: l_price,
-                wh_price: w.price,
-                ledger_amt: l_amt,
-                wh_amt: w.amount,
-                diff_amt,
-            });
-        } else {
-            // 仅库管有在库，财务未建账或无此编码
-            records.push(AuditRecord {
-                category: category_name.to_string(),
-                status: "WH_ONLY".to_string(),
-                status_desc: "仅库管有在库".to_string(),
-                name: w.name.clone(),
-                spec: w.spec.clone(),
-                factory: w.factory.clone(),
-                unit: w.unit.clone(),
-                ledger_code: "-".to_string(),
-                ledger_name: "-".to_string(),
-                ledger_qty: 0.0,
-                wh_qty: w.qty,
-                diff_qty: -w.qty,
-                ledger_price: 0.0,
-                wh_price: w.price,
-                ledger_amt: 0.0,
-                wh_amt: w.amount,
-                diff_amt: -w.amount,
-            });
-        }
-    }
-
-    // 2. 检查财务总账中存在但库管未列出的品规 (仅财务有账)
-    for l in ledger_entries {
-        if !matched_ledger_codes.contains(&l.code) {
-            let l_amt = (l.end_qty * l.price * 100.0).round() / 100.0;
-            records.push(AuditRecord {
-                category: category_name.to_string(),
-                status: "LEDGER_ONLY".to_string(),
-                status_desc: "仅财务有结存".to_string(),
-                name: l.drug_name.clone(),
-                spec: l.spec.clone(),
-                factory: "-".to_string(),
-                unit: "-".to_string(),
-                ledger_code: l.code.clone(),
-                ledger_name: l.name_full.clone(),
-                ledger_qty: l.end_qty,
-                wh_qty: 0.0,
-                diff_qty: l.end_qty,
-                ledger_price: l.price,
-                wh_price: 0.0,
-                ledger_amt: l_amt,
-                wh_amt: 0.0,
-                diff_amt: l_amt,
-            });
-        }
-    }
-
-    let total_items = records.len();
-    let equal_count = records.iter().filter(|r| r.status == "EQUAL").count();
-    let diff_count = records.iter().filter(|r| r.status == "DIFF_QTY").count();
-    let wh_only_count = records.iter().filter(|r| r.status == "WH_ONLY").count();
-    let ledger_only_count = records.iter().filter(|r| r.status == "LEDGER_ONLY").count();
-    let total_diff_amt = records.iter().map(|r| r.diff_amt).sum::<f64>();
-    let match_rate = if total_items > 0 {
-        ((equal_count as f64 / total_items as f64) * 1000.0).round() / 10.0
-    } else {
-        0.0
-    };
-
-    CategoryAuditResult {
-        category: category_name.to_string(),
-        summary: CategorySummary {
-            total_items,
-            equal_count,
-            diff_count,
-            wh_only_count,
-            ledger_only_count,
-            match_rate,
-            total_diff_amt: (total_diff_amt * 100.0).round() / 100.0,
-        },
-        records,
-    }
-}
-
-/// 执行多库账实核对并输出 Excel 审计分析报告
-pub fn run_inventory_audit(
-    ledger_path: &str,
-    west_path: Option<&str>,
-    tcm_path: Option<&str>,
-    hc_path: Option<&str>,
-    custom_output: Option<&str>,
-    config: &ConfigData,
-) -> Result<OverallAuditResult, String> {
-    let ledger_p = Path::new(ledger_path);
-    if !ledger_p.exists() {
-        return Err(format!("财务总账文件 '{:?}' 不存在", ledger_p));
-    }
-
-    // 1. 读取总账并分类划分
+/// 读取财务总账并按类别划分为西药、中药（含饮片ZY与颗粒KL）、耗材
+pub fn load_categorized_ledger(
+    ledger_p: &Path,
+) -> Result<(Vec<LedgerEntry>, Vec<LedgerEntry>, Vec<LedgerEntry>), String> {
     let mut wb_ledger = open_excel(ledger_p)?;
     let sheet_name = wb_ledger
         .sheet_names()
@@ -307,7 +233,15 @@ pub fn run_inventory_audit(
         let spec = if parts.len() > 1 { parts[1].to_string() } else { String::new() };
 
         let end_qty = if row.len() > 16 { cell_as_f64(&row[16]) } else { 0.0 };
-        let price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
+        let end_price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
+        let init_price = if row.len() > 5 { cell_as_f64(&row[5]) } else { 0.0 };
+        let price = if end_price > 0.0 {
+            end_price
+        } else if init_price > 0.0 {
+            init_price
+        } else {
+            0.0
+        };
 
         let entry = LedgerEntry {
             code: code.clone(),
@@ -321,50 +255,344 @@ pub fn run_inventory_audit(
 
         if code.starts_with("1201_XY") {
             ledger_xy.push(entry);
-        } else if code.starts_with("1201_ZY") {
+        } else if code.starts_with("1201_ZY") || code.starts_with("1201_KL") {
+            // 中药房包含 1201_ZY (中药饮片) 和 1201_KL (中药配方颗粒)！
             ledger_zy.push(entry);
         } else if code.starts_with("1201_HC") {
             ledger_hc.push(entry);
         }
     }
 
-    let mut categories = Vec::new();
+    Ok((ledger_xy, ledger_zy, ledger_hc))
+}
 
-    // 2. 比对西药房
+fn build_mapping_item(
+    id: usize,
+    category: &str,
+    w: WarehouseItem,
+    ledger_entries: &[LedgerEntry],
+    config: &ConfigData,
+) -> AuditMappingItem {
+    let matched_res = match_drug_with_method(&w.name, &w.spec, &w.factory, ledger_entries, config);
+
+    // 筛选前 25 个候选（优先品名相关的候选）
+    let clean_w_name = clean_text(&w.name);
+    let mut relevant_cands: Vec<LedgerCandidateOption> = ledger_entries
+        .iter()
+        .filter(|e| {
+            let c_name = clean_text(&e.drug_name);
+            c_name.contains(&clean_w_name) || clean_w_name.contains(&c_name)
+        })
+        .take(15)
+        .map(|e| LedgerCandidateOption {
+            code: e.code.clone(),
+            name: e.name_full.clone(),
+            spec: e.spec.clone(),
+            qty: e.end_qty,
+            price: e.price,
+        })
+        .collect();
+
+    // 如果相关候选不足，补充其它同类条目至多 25 个
+    if relevant_cands.len() < 25 {
+        for e in ledger_entries {
+            if relevant_cands.len() >= 25 {
+                break;
+            }
+            if !relevant_cands.iter().any(|c| c.code == e.code) {
+                relevant_cands.push(LedgerCandidateOption {
+                    code: e.code.clone(),
+                    name: e.name_full.clone(),
+                    spec: e.spec.clone(),
+                    qty: e.end_qty,
+                    price: e.price,
+                });
+            }
+        }
+    }
+
+    if let Some((m, method)) = matched_res {
+        let l_amt = (m.end_qty * m.price * 100.0).round() / 100.0;
+        AuditMappingItem {
+            id,
+            category: category.to_string(),
+            wh_name: w.name,
+            wh_spec: w.spec,
+            wh_factory: w.factory,
+            wh_unit: w.unit,
+            wh_qty: w.qty,
+            wh_price: w.price,
+            wh_amount: w.amount,
+            matched: true,
+            checked: true, // 自动识别后默认勾选上！
+            match_method: method,
+            ledger_code: m.code,
+            ledger_name: m.name_full,
+            ledger_qty: m.end_qty,
+            ledger_price: m.price,
+            ledger_amount: l_amt,
+            candidates: relevant_cands,
+        }
+    } else {
+        AuditMappingItem {
+            id,
+            category: category.to_string(),
+            wh_name: w.name,
+            wh_spec: w.spec,
+            wh_factory: w.factory,
+            wh_unit: w.unit,
+            wh_qty: w.qty,
+            wh_price: w.price,
+            wh_amount: w.amount,
+            matched: false,
+            checked: false,
+            match_method: "未自动匹配".to_string(),
+            ledger_code: String::new(),
+            ledger_name: String::new(),
+            ledger_qty: 0.0,
+            ledger_price: 0.0,
+            ledger_amount: 0.0,
+            candidates: relevant_cands,
+        }
+    }
+}
+
+/// 第一步：智能识别多库与总账映射关系（供前端展示与确认）
+pub fn preview_inventory_audit_mapping(
+    ledger_path: &str,
+    west_path: Option<&str>,
+    tcm_path: Option<&str>,
+    hc_path: Option<&str>,
+    config: &ConfigData,
+) -> Result<AuditMappingPreviewResult, String> {
+    let ledger_p = Path::new(ledger_path);
+    if !ledger_p.exists() {
+        return Err(format!("财务总账文件 '{:?}' 不存在", ledger_p));
+    }
+
+    let (ledger_xy, ledger_zy, ledger_hc) = load_categorized_ledger(ledger_p)?;
+
+    let mut all_items = Vec::new();
+    let mut next_id = 1;
+
+    // 1. 西药房
     if let Some(wp) = west_path {
         let p = Path::new(wp);
         if p.exists() {
-            let items = load_warehouse_items(p)?;
-            let res = audit_single_category("西药房", &ledger_xy, &items, config);
-            categories.push(res);
+            let wh_items = load_warehouse_items(p)?;
+            for w in wh_items {
+                let item = build_mapping_item(next_id, "西药房", w, &ledger_xy, config);
+                next_id += 1;
+                all_items.push(item);
+            }
         }
     }
 
-    // 3. 比对中药房
+    // 2. 中药房（含 ZY 饮片 与 KL 配方颗粒）
     if let Some(tp) = tcm_path {
         let p = Path::new(tp);
         if p.exists() {
-            let items = load_warehouse_items(p)?;
-            let res = audit_single_category("中药房", &ledger_zy, &items, config);
-            categories.push(res);
+            let wh_items = load_warehouse_items(p)?;
+            for w in wh_items {
+                let item = build_mapping_item(next_id, "中药房", w, &ledger_zy, config);
+                next_id += 1;
+                all_items.push(item);
+            }
         }
     }
 
-    // 4. 比对耗材库
+    // 3. 耗材库
     if let Some(hp) = hc_path {
         let p = Path::new(hp);
         if p.exists() {
-            let items = load_warehouse_items(p)?;
-            let res = audit_single_category("耗材库", &ledger_hc, &items, config);
-            categories.push(res);
+            let wh_items = load_warehouse_items(p)?;
+            for w in wh_items {
+                let item = build_mapping_item(next_id, "耗材库", w, &ledger_hc, config);
+                next_id += 1;
+                all_items.push(item);
+            }
         }
     }
 
-    if categories.is_empty() {
+    if all_items.is_empty() {
         return Err("未指定有效的库管库存报表（西药房/中药房/耗材库）".into());
     }
 
-    // 5. 汇总全局 KPI
+    let total_items = all_items.len();
+    let matched_count = all_items.iter().filter(|it| it.matched).count();
+    let unmatched_count = total_items - matched_count;
+    let match_rate = if total_items > 0 {
+        ((matched_count as f64 / total_items as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    Ok(AuditMappingPreviewResult {
+        success: true,
+        total_items,
+        matched_count,
+        unmatched_count,
+        match_rate,
+        items: all_items,
+        error: None,
+    })
+}
+
+/// 第二步：根据用户确认的勾选与映射关系，执行比对并生成审计分析报告 Excel
+pub fn execute_inventory_audit_with_mapping(
+    ledger_path: &str,
+    confirmed_items: Vec<ConfirmedAuditMappingItem>,
+    custom_output: Option<&str>,
+    _config: &ConfigData,
+) -> Result<OverallAuditResult, String> {
+    let ledger_p = Path::new(ledger_path);
+    if !ledger_p.exists() {
+        return Err(format!("财务总账文件 '{:?}' 不存在", ledger_p));
+    }
+
+    let (ledger_xy, ledger_zy, ledger_hc) = load_categorized_ledger(ledger_p)?;
+
+    let mut categories = Vec::new();
+    let category_defs = [
+        ("西药房", &ledger_xy),
+        ("中药房", &ledger_zy),
+        ("耗材库", &ledger_hc),
+    ];
+
+    for (cat_name, ledger_list) in &category_defs {
+        let cat_items: Vec<&ConfirmedAuditMappingItem> = confirmed_items
+            .iter()
+            .filter(|it| it.category == *cat_name)
+            .collect();
+
+        if cat_items.is_empty() {
+            continue;
+        }
+
+        let mut records = Vec::new();
+        let mut matched_ledger_codes = HashSet::new();
+
+        // 1. 处理库管项目
+        for it in cat_items {
+            let mut matched_entry: Option<&LedgerEntry> = None;
+            if it.checked && !it.ledger_code.is_empty() {
+                matched_entry = ledger_list.iter().find(|l| l.code == it.ledger_code);
+            }
+
+            if let Some(m) = matched_entry {
+                matched_ledger_codes.insert(m.code.clone());
+                let l_qty = m.end_qty;
+                let l_price = m.price;
+                let l_amt = (l_qty * l_price * 100.0).round() / 100.0;
+                let diff_qty = ((l_qty - it.wh_qty) * 100.0).round() / 100.0;
+                let diff_amt = ((l_amt - it.wh_amount) * 100.0).round() / 100.0;
+
+                let (status, status_desc) = if diff_qty.abs() < 0.001 {
+                    ("EQUAL".to_string(), "数量完全吻合".to_string())
+                } else {
+                    ("DIFF_QTY".to_string(), "存在数量差异".to_string())
+                };
+
+                records.push(AuditRecord {
+                    category: cat_name.to_string(),
+                    status,
+                    status_desc,
+                    name: it.wh_name.clone(),
+                    spec: it.wh_spec.clone(),
+                    factory: it.wh_factory.clone(),
+                    unit: it.wh_unit.clone(),
+                    ledger_code: m.code.clone(),
+                    ledger_name: m.name_full.clone(),
+                    ledger_qty: l_qty,
+                    wh_qty: it.wh_qty,
+                    diff_qty,
+                    ledger_price: l_price,
+                    wh_price: it.wh_price,
+                    ledger_amt: l_amt,
+                    wh_amt: it.wh_amount,
+                    diff_amt,
+                });
+            } else {
+                records.push(AuditRecord {
+                    category: cat_name.to_string(),
+                    status: "WH_ONLY".to_string(),
+                    status_desc: "仅库管有在库".to_string(),
+                    name: it.wh_name.clone(),
+                    spec: it.wh_spec.clone(),
+                    factory: it.wh_factory.clone(),
+                    unit: it.wh_unit.clone(),
+                    ledger_code: "-".to_string(),
+                    ledger_name: "-".to_string(),
+                    ledger_qty: 0.0,
+                    wh_qty: it.wh_qty,
+                    diff_qty: -it.wh_qty,
+                    ledger_price: 0.0,
+                    wh_price: it.wh_price,
+                    ledger_amt: 0.0,
+                    wh_amt: it.wh_amount,
+                    diff_amt: -it.wh_amount,
+                });
+            }
+        }
+
+        // 2. 处理仅财务有结存的项目
+        for l in *ledger_list {
+            if !matched_ledger_codes.contains(&l.code) {
+                let l_amt = (l.end_qty * l.price * 100.0).round() / 100.0;
+                records.push(AuditRecord {
+                    category: cat_name.to_string(),
+                    status: "LEDGER_ONLY".to_string(),
+                    status_desc: "仅财务有结存".to_string(),
+                    name: l.drug_name.clone(),
+                    spec: l.spec.clone(),
+                    factory: "-".to_string(),
+                    unit: "-".to_string(),
+                    ledger_code: l.code.clone(),
+                    ledger_name: l.name_full.clone(),
+                    ledger_qty: l.end_qty,
+                    wh_qty: 0.0,
+                    diff_qty: l.end_qty,
+                    ledger_price: l.price,
+                    wh_price: 0.0,
+                    ledger_amt: l_amt,
+                    wh_amt: 0.0,
+                    diff_amt: l_amt,
+                });
+            }
+        }
+
+        let total_items = records.len();
+        let equal_count = records.iter().filter(|r| r.status == "EQUAL").count();
+        let diff_count = records.iter().filter(|r| r.status == "DIFF_QTY").count();
+        let wh_only_count = records.iter().filter(|r| r.status == "WH_ONLY").count();
+        let ledger_only_count = records.iter().filter(|r| r.status == "LEDGER_ONLY").count();
+        let total_diff_amt = records.iter().map(|r| r.diff_amt).sum::<f64>();
+        let match_rate = if total_items > 0 {
+            ((equal_count as f64 / total_items as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        categories.push(CategoryAuditResult {
+            category: cat_name.to_string(),
+            summary: CategorySummary {
+                total_items,
+                equal_count,
+                diff_count,
+                wh_only_count,
+                ledger_only_count,
+                match_rate,
+                total_diff_amt: (total_diff_amt * 100.0).round() / 10.0,
+            },
+            records,
+        });
+    }
+
+    if categories.is_empty() {
+        return Err("核对结果为空，请确认是否提供了有效的在库数据。".into());
+    }
+
+    // 汇总全局 KPI
     let grand_total = categories.iter().map(|c| c.summary.total_items).sum();
     let grand_equal = categories.iter().map(|c| c.summary.equal_count).sum();
     let grand_diff = categories.iter().map(|c| c.summary.diff_count).sum();
@@ -387,10 +615,62 @@ pub fn run_inventory_audit(
         total_diff_amt: (grand_diff_amt * 100.0).round() / 100.0,
     };
 
-    // 6. 使用 rust_xlsxwriter 生成 3 个 Sheet 审计底稿
+    let out_path_buf = if let Some(co) = custom_output {
+        PathBuf::from(co)
+    } else {
+        let parent = ledger_p.parent().unwrap_or_else(|| Path::new("."));
+        parent.join("账实库存核对分析报告_已生成.xlsx")
+    };
+
+    generate_audit_report_excel(&categories, &out_path_buf)?;
+
+    Ok(OverallAuditResult {
+        success: true,
+        output_file: out_path_buf.to_string_lossy().to_string(),
+        overall: overall_summary,
+        categories,
+        error: None,
+    })
+}
+
+/// 执行多库账实核对（兼容原有直接核对调用）
+pub fn run_inventory_audit(
+    ledger_path: &str,
+    west_path: Option<&str>,
+    tcm_path: Option<&str>,
+    hc_path: Option<&str>,
+    custom_output: Option<&str>,
+    config: &ConfigData,
+) -> Result<OverallAuditResult, String> {
+    let preview = preview_inventory_audit_mapping(ledger_path, west_path, tcm_path, hc_path, config)?;
+    let confirmed: Vec<ConfirmedAuditMappingItem> = preview
+        .items
+        .into_iter()
+        .map(|it| ConfirmedAuditMappingItem {
+            id: it.id,
+            category: it.category,
+            wh_name: it.wh_name,
+            wh_spec: it.wh_spec,
+            wh_factory: it.wh_factory,
+            wh_unit: it.wh_unit,
+            wh_qty: it.wh_qty,
+            wh_price: it.wh_price,
+            wh_amount: it.wh_amount,
+            checked: it.matched,
+            ledger_code: it.ledger_code,
+        })
+        .collect();
+
+    execute_inventory_audit_with_mapping(ledger_path, confirmed, custom_output, config)
+}
+
+/// 输出标准 3-Sheet Excel 审计分析报告
+fn generate_audit_report_excel(
+    categories: &[CategoryAuditResult],
+    out_path: &Path,
+) -> Result<(), String> {
     let mut out_wb = Workbook::new();
 
-    // 样式
     let fmt_title = Format::new()
         .set_bold()
         .set_font_size(14)
@@ -482,7 +762,7 @@ pub fn run_inventory_audit(
     }
 
     let mut row_diff = 1;
-    for cat in &categories {
+    for cat in categories {
         for r in &cat.records {
             if r.status == "EQUAL" {
                 continue;
@@ -522,7 +802,7 @@ pub fn run_inventory_audit(
     }
 
     let mut row_all = 1;
-    for cat in &categories {
+    for cat in categories {
         for r in &cat.records {
             ws_all.write_string_with_format(row_all, 0, &r.category, &fmt_cell_center).map_err(|e| e.to_string())?;
             ws_all.write_string_with_format(row_all, 1, &r.status_desc, &fmt_cell_center).map_err(|e| e.to_string())?;
@@ -550,22 +830,9 @@ pub fn run_inventory_audit(
     ws_all.set_column_width(3, 16).map_err(|e| e.to_string())?;
     ws_all.set_column_width(4, 20).map_err(|e| e.to_string())?;
 
-    let out_path_buf = if let Some(co) = custom_output {
-        PathBuf::from(co)
-    } else {
-        let parent = ledger_p.parent().unwrap_or_else(|| Path::new("."));
-        parent.join("账实库存核对分析报告_已生成.xlsx")
-    };
-
     out_wb
-        .save(&out_path_buf)
+        .save(out_path)
         .map_err(|e| format!("保存审计报告 Excel 失败: {}", e))?;
 
-    Ok(OverallAuditResult {
-        success: true,
-        output_file: out_path_buf.to_string_lossy().to_string(),
-        overall: overall_summary,
-        categories,
-        error: None,
-    })
+    Ok(())
 }

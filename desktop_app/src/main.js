@@ -39,7 +39,11 @@ const state = {
   },
   auditData: null,
   currentAuditCat: 'ALL',
-  auditDiffOnly: false
+  auditDiffOnly: false,
+  auditPreview: null,
+  previewCat: 'ALL',
+  previewUnmatchedOnly: false,
+  previewSearch: ''
 };
 
 // HTML 转义防注入
@@ -1043,14 +1047,13 @@ function initTabCompare() {
     if (input) setupDropzone(input, input.closest('.file-input-row') || input.parentElement);
   });
 
-  // 开始核对执行
+  // 第一步：智能识别多库与总账映射关系
   if (btnRun) {
     btnRun.onclick = async () => {
       const ledger = inputLedger.value.trim();
       const west = inputWest.value.trim();
       const tcm = inputTcm.value.trim();
       const hc = inputHc.value.trim();
-      const output = inputOut.value.trim();
 
       if (!ledger) {
         showToast('请指定财务系统数量金额总账文件！', 'warning');
@@ -1063,16 +1066,81 @@ function initTabCompare() {
         return;
       }
 
-      showLoading('正在进行财务总账与各库管库存四维多库比对并生成审计报告...');
+      showLoading('正在运用增强智能算法匹配多库在库品规与财务存货科目...');
 
       try {
-        const res = await invoke('execute_inventory_audit', {
+        const res = await invoke('preview_inventory_audit_mapping', {
           ledger,
           west: west || null,
           tcm: tcm || null,
           hc: hc || null,
-          config: null,
-          output: output || null
+          config: null
+        });
+
+        hideLoading();
+
+        if (res && res.success) {
+          state.auditPreview = res;
+          renderComparePreviewDashboard(res);
+          renderComparePreviewTable();
+
+          const previewCard = document.getElementById('compare-preview-card');
+          if (previewCard) {
+            previewCard.classList.remove('hidden');
+            previewCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+
+          showToast(`智能识别完成：共 ${res.total_wh_items} 个品规，已自动匹配 ${res.matched_count} 个（${res.match_rate}%），识别项已默认自动勾选！`, 'success');
+        } else {
+          showToast(`智能识别失败: ${res?.error || '未知错误'}`, 'error');
+        }
+      } catch (err) {
+        hideLoading();
+        showToast(`智能识别异常: ${err}`, 'error');
+      }
+    };
+  }
+
+  // 第二步：确认匹配关系，生成核对报告
+  const btnConfirmRun = document.getElementById('btn-confirm-and-run-compare');
+  if (btnConfirmRun) {
+    btnConfirmRun.onclick = async () => {
+      if (!state.auditPreview || !state.auditPreview.items || state.auditPreview.items.length === 0) {
+        showToast('请先执行【第一步：智能识别多库映射关系】！', 'warning');
+        return;
+      }
+
+      const ledger = inputLedger.value.trim();
+      const output = inputOut.value.trim();
+
+      const confirmedItems = state.auditPreview.items.map(it => ({
+        id: it.id,
+        category: it.category,
+        wh_name: it.wh_name,
+        wh_spec: it.wh_spec,
+        wh_factory: it.wh_factory,
+        wh_unit: it.wh_unit,
+        wh_qty: it.wh_qty,
+        wh_price: it.wh_price,
+        wh_amount: it.wh_amount,
+        checked: !!it.checked,
+        ledger_code: it.ledger_code || ''
+      }));
+
+      const checkedCount = confirmedItems.filter(it => it.checked && it.ledger_code).length;
+      if (checkedCount === 0) {
+        showToast('未勾选任何已匹配的品规！请至少勾选确认一项后再生成报告。', 'warning');
+        return;
+      }
+
+      showLoading(`正在依据确认的 ${checkedCount} 项映射关系执行账实对账，并生成分析报告...`);
+
+      try {
+        const res = await invoke('execute_inventory_audit_with_mapping', {
+          ledger,
+          confirmed_items: confirmedItems,
+          output: output || null,
+          config: null
         });
 
         hideLoading();
@@ -1084,18 +1152,122 @@ function initTabCompare() {
           renderCompareDashboard(res);
           renderCompareTable();
 
-          showToast('账实库存多库智能核对完成！', 'success');
+          const resultCard = document.getElementById('compare-result-card');
+          if (resultCard) {
+            resultCard.classList.remove('hidden');
+            resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+
+          showToast('账实库存核对分析报告生成成功！', 'success');
         } else {
-          showToast(`核对失败: ${res?.error || '未知错误'}`, 'error');
+          showToast(`核对生成失败: ${res?.error || '未知错误'}`, 'error');
         }
       } catch (err) {
         hideLoading();
-        showToast(`核对执行异常: ${err}`, 'error');
+        showToast(`核对生成异常: ${err}`, 'error');
       }
     };
   }
 
-  // 库房分类 Tab 筛选切换
+  // 预览卡片：库房分类切换
+  const previewCatTabs = document.getElementById('preview-cat-tabs');
+  if (previewCatTabs) {
+    previewCatTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cat-pill');
+      if (!btn) return;
+      previewCatTabs.querySelectorAll('.cat-pill').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.previewCat = btn.dataset.cat || 'ALL';
+      renderComparePreviewTable();
+    });
+  }
+
+  // 预览卡片：仅看未自动匹配
+  const chkPreviewUnmatched = document.getElementById('chk-preview-unmatched-only');
+  if (chkPreviewUnmatched) {
+    chkPreviewUnmatched.addEventListener('change', () => {
+      state.previewUnmatchedOnly = chkPreviewUnmatched.checked;
+      renderComparePreviewTable();
+    });
+  }
+
+  // 预览卡片：搜索过滤
+  const inputPreviewSearch = document.getElementById('input-preview-search');
+  if (inputPreviewSearch) {
+    inputPreviewSearch.addEventListener('input', () => {
+      state.previewSearch = inputPreviewSearch.value.trim().toLowerCase();
+      renderComparePreviewTable();
+    });
+  }
+
+  // 预览卡片：全选与取消全选
+  const btnPreviewSelectAll = document.getElementById('btn-preview-select-all');
+  if (btnPreviewSelectAll) {
+    btnPreviewSelectAll.onclick = () => {
+      setPreviewSelection(true);
+    };
+  }
+
+  const btnPreviewDeselectAll = document.getElementById('btn-preview-deselect-all');
+  if (btnPreviewDeselectAll) {
+    btnPreviewDeselectAll.onclick = () => {
+      setPreviewSelection(false);
+    };
+  }
+
+  // 表头全选 Checkbox
+  const thChkAll = document.getElementById('th-chk-all');
+  if (thChkAll) {
+    thChkAll.addEventListener('change', () => {
+      setPreviewSelection(thChkAll.checked);
+    });
+  }
+
+  // 预览表格内的交互事件委托（勾选框与候选下拉框）
+  const previewTable = document.getElementById('compare-preview-table');
+  if (previewTable) {
+    previewTable.addEventListener('change', (e) => {
+      const target = e.target;
+      if (target.classList.contains('chk-preview-row')) {
+        const id = parseInt(target.dataset.id, 10);
+        const item = state.auditPreview?.items?.find(it => it.id === id);
+        if (item) {
+          item.checked = target.checked;
+          updatePreviewStats();
+        }
+      } else if (target.classList.contains('candidate-select')) {
+        const id = parseInt(target.dataset.id, 10);
+        const item = state.auditPreview?.items?.find(it => it.id === id);
+        if (item) {
+          const val = target.value;
+          if (val === '__NONE__' || !val) {
+            item.ledger_code = '';
+            item.ledger_name = '';
+            item.ledger_qty = 0;
+            item.ledger_amount = 0;
+            item.matched = false;
+            item.checked = false;
+            item.match_method = '未自动匹配';
+          } else {
+            const cand = item.candidates?.find(c => c.code === val);
+            if (cand) {
+              item.ledger_code = cand.code;
+              item.ledger_name = cand.name;
+              item.ledger_qty = cand.qty;
+              item.ledger_amount = cand.amt;
+              item.matched = true;
+              item.checked = true;
+              item.match_method = '人工指定';
+            }
+          }
+          renderComparePreviewTable();
+          updatePreviewStats();
+        }
+      }
+    });
+  }
+
+  // 库房分类 Tab 筛选切换 (结果卡片)
   const catTabs = document.getElementById('compare-cat-tabs');
   if (catTabs) {
     catTabs.addEventListener('click', (e) => {
@@ -1108,7 +1280,7 @@ function initTabCompare() {
     });
   }
 
-  // 差异快速过滤复选框
+  // 差异快速过滤复选框 (结果卡片)
   const chkDiff = document.getElementById('chk-compare-diff-only');
   if (chkDiff) {
     chkDiff.addEventListener('change', () => {
@@ -1139,6 +1311,169 @@ function initTabCompare() {
       }
     };
   }
+}
+
+// 批量修改当前筛选视图下的勾选状态
+function setPreviewSelection(checked) {
+  if (!state.auditPreview || !state.auditPreview.items) return;
+  const filtered = getFilteredPreviewItems();
+  filtered.forEach(it => {
+    // 只有已匹配或者已选总账科目的项才允许勾选
+    if (checked) {
+      if (it.ledger_code) {
+        it.checked = true;
+      }
+    } else {
+      it.checked = false;
+    }
+  });
+  renderComparePreviewTable();
+  updatePreviewStats();
+}
+
+// 获取经过分类、未匹配、搜索过滤的预览项目
+function getFilteredPreviewItems() {
+  if (!state.auditPreview || !state.auditPreview.items) return [];
+  let list = state.auditPreview.items;
+
+  if (state.previewCat && state.previewCat !== 'ALL') {
+    list = list.filter(it => it.category === state.previewCat);
+  }
+
+  if (state.previewUnmatchedOnly) {
+    list = list.filter(it => !it.matched || !it.ledger_code);
+  }
+
+  if (state.previewSearch) {
+    const kw = state.previewSearch;
+    list = list.filter(it => {
+      return (it.wh_name && it.wh_name.toLowerCase().includes(kw)) ||
+             (it.wh_factory && it.wh_factory.toLowerCase().includes(kw)) ||
+             (it.ledger_name && it.ledger_name.toLowerCase().includes(kw)) ||
+             (it.ledger_code && it.ledger_code.toLowerCase().includes(kw));
+    });
+  }
+
+  return list;
+}
+
+// 动态刷新预览界面的匹配统计数值
+function updatePreviewStats() {
+  if (!state.auditPreview || !state.auditPreview.items) return;
+  const items = state.auditPreview.items;
+  const total = items.length;
+  const matched = items.filter(it => it.ledger_code && it.ledger_code.length > 0).length;
+  const unmatched = total - matched;
+  const rate = total > 0 ? ((matched / total) * 100).toFixed(1) : '0.0';
+
+  const totalEl = document.getElementById('preview-total-count');
+  const matchedEl = document.getElementById('preview-matched-count');
+  const rateEl = document.getElementById('preview-rate-text');
+  const unmatchedEl = document.getElementById('preview-unmatched-count');
+
+  if (totalEl) totalEl.textContent = total.toLocaleString();
+  if (matchedEl) matchedEl.textContent = matched.toLocaleString();
+  if (rateEl) rateEl.textContent = `${rate}%`;
+  if (unmatchedEl) unmatchedEl.textContent = unmatched.toLocaleString();
+}
+
+// 渲染预览仪表盘
+function renderComparePreviewDashboard(res) {
+  updatePreviewStats();
+}
+
+// 匹配方法样式徽标生成
+function getMethodBadgeHtml(method) {
+  if (!method) return '<span class="badge-method method-none">未匹配</span>';
+  if (method.includes('精确品名+厂家')) {
+    return `<span class="badge-method method-exact">⚡ ${escapeHtml(method)}</span>`;
+  }
+  if (method.includes('别名') || method.includes('厂商简称') || method.includes('反向提取')) {
+    return `<span class="badge-method method-alias">🏷️ ${escapeHtml(method)}</span>`;
+  }
+  if (method.includes('纯品名')) {
+    return `<span class="badge-method method-pure">🔍 ${escapeHtml(method)}</span>`;
+  }
+  if (method.includes('包含')) {
+    return `<span class="badge-method method-sub">💡 ${escapeHtml(method)}</span>`;
+  }
+  if (method.includes('炮制')) {
+    return `<span class="badge-method method-tcm">🌿 ${escapeHtml(method)}</span>`;
+  }
+  if (method.includes('人工')) {
+    return `<span class="badge-method method-manual">✏️ ${escapeHtml(method)}</span>`;
+  }
+  return `<span class="badge-method method-none">${escapeHtml(method)}</span>`;
+}
+
+// 渲染第一步映射对照预览表格
+function renderComparePreviewTable() {
+  const tbody = document.getElementById('compare-preview-table')?.querySelector('tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  const items = getFilteredPreviewItems();
+
+  if (items.length === 0) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="12" style="text-align: center; color: var(--text-muted); padding: 24px;">暂无可显示的品规（当前筛选条件下无记录）</td>`;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  items.forEach(it => {
+    const tr = document.createElement('tr');
+    if (!it.matched || !it.ledger_code) {
+      tr.className = 'row-unmatched';
+    }
+
+    // 手动调整下拉选项构建
+    let candidateSelectHtml = '';
+    if (it.candidates && it.candidates.length > 0) {
+      candidateSelectHtml = `<select class="candidate-select" data-id="${it.id}">`;
+      candidateSelectHtml += `<option value="">-- 手动选择科目 --</option>`;
+      it.candidates.forEach(c => {
+        const isSel = c.code === it.ledger_code ? 'selected' : '';
+        candidateSelectHtml += `<option value="${escapeHtml(c.code)}" ${isSel}>${escapeHtml(c.name)} (${escapeHtml(c.code)}) [存:${c.qty}]</option>`;
+      });
+      candidateSelectHtml += `<option value="__NONE__">【置空/不关联】</option>`;
+      candidateSelectHtml += `</select>`;
+    } else {
+      candidateSelectHtml = `<span style="color: var(--text-muted); font-size: 11px;">无相近科目</span>`;
+    }
+
+    const ledgerCodeText = it.ledger_code
+      ? `<span style="font-family: monospace; color: #38bdf8; font-weight: 600;">${escapeHtml(it.ledger_code)}</span>`
+      : `<span style="color: var(--text-muted);">-</span>`;
+
+    const ledgerNameText = it.ledger_name
+      ? `<span style="color: #e2e8f0; font-size: 12px;">${escapeHtml(it.ledger_name)}</span>`
+      : `<span style="color: #f59e0b; font-size: 12px;">（待确认/未匹配）</span>`;
+
+    const ledgerQtyText = it.ledger_code
+      ? (it.ledger_qty ?? 0).toLocaleString()
+      : '-';
+
+    const disabledAttr = !it.ledger_code ? 'disabled' : '';
+
+    tr.innerHTML = `
+      <td style="text-align: center;">
+        <input type="checkbox" class="chk-preview-row" data-id="${it.id}" ${it.checked ? 'checked' : ''} ${disabledAttr} />
+      </td>
+      <td><span class="cat-pill" style="padding: 2px 6px; font-size: 11px;">${escapeHtml(it.category)}</span></td>
+      <td style="font-weight: 600; color: #fff;">${escapeHtml(it.wh_name)}</td>
+      <td style="font-size: 12px; color: var(--text-muted);">${escapeHtml(it.wh_spec || '-')}</td>
+      <td style="font-size: 12px; color: var(--text-muted);">${escapeHtml(it.wh_factory || '-')}</td>
+      <td style="text-align: right; font-family: monospace; color: #e2e8f0;">${(it.wh_qty ?? 0).toLocaleString()}</td>
+      <td style="text-align: center; color: var(--text-muted);">➔</td>
+      <td>${ledgerCodeText}</td>
+      <td>${ledgerNameText}</td>
+      <td style="text-align: right; font-family: monospace; color: #a5f3fc;">${ledgerQtyText}</td>
+      <td>${getMethodBadgeHtml(it.match_method)}</td>
+      <td style="text-align: center;">${candidateSelectHtml}</td>
+    `;
+    tbody.appendChild(tr);
+  });
 }
 
 // 渲染核对结果仪表盘卡片群

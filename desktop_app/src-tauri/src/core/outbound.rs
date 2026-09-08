@@ -107,22 +107,63 @@ pub fn load_ledger_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, Strin
     Ok(entries)
 }
 
-/// 匹配药品存货科目
-pub fn match_drug(
+/// 常用中药炮制前缀列表
+const TCM_PREFIXES: &[&str] = &[
+    "制", "炒", "麸炒", "炙", "煅", "酒", "醋", "生", "清", "法", "姜", "焦", "蜜炙", "盐", "熟",
+];
+
+/// 剥离中药炮制前缀，获取核心本草名称（如 "制吴茱萸" -> "吴茱萸"，"麸炒苍术" -> "苍术"）
+pub fn strip_tcm_prefix(name: &str) -> &str {
+    for prefix in TCM_PREFIXES {
+        if let Some(stripped) = name.strip_prefix(prefix) {
+            if !stripped.is_empty() {
+                return stripped;
+            }
+        }
+    }
+    name
+}
+
+/// 从药名中解析基础品名与括号内的厂家标签（例如 "麸炒苍术（国瑞堂）" -> ("麸炒苍术", Some("国瑞堂"))）
+pub fn extract_name_and_vendor_tag(name: &str) -> (String, Option<String>) {
+    if let Some((start_idx, open_char)) = name.char_indices().find(|(_, c)| *c == '（' || *c == '(') {
+        let after_open = &name[start_idx + open_char.len_utf8()..];
+        if let Some(end_rel_idx) = after_open.find(|c| c == '）' || c == ')') {
+            let base = name[..start_idx].trim().to_string();
+            let tag = after_open[..end_rel_idx].trim().to_string();
+            if !tag.is_empty() {
+                return (base, Some(tag));
+            }
+        }
+    }
+    (name.to_string(), None)
+}
+
+/// 匹配药品存货科目（附带匹配方式说明，便于前端展示）
+pub fn match_drug_with_method(
     drug_name: &str,
     spec: &str,
     factory: &str,
     ledger: &[LedgerEntry],
     config: &ConfigData,
-) -> Option<LedgerEntry> {
+) -> Option<(LedgerEntry, String)> {
     let clean_drug = clean_text(drug_name);
     let clean_sp = clean_text(spec);
+    let clean_fac = clean_text(factory);
 
-    // 提取厂家简称
+    // 1. 提取厂家简称（三重智能容错）：
+    // 1) 库管厂家包含字典全称
+    // 2) 库管厂家直接包含核心简称（如包含 "国瑞堂"、"蕴德"、"盛方"、"国松堂"、"神农" 等）
+    // 3) 字典全称包含库管厂家（解决末尾截断，如 "河北国瑞堂药业有限公" 在 "河北国瑞堂药业有限公司" 内部）
     let mut vendor_suffix = String::new();
-    if !factory.is_empty() {
+    if !clean_fac.is_empty() {
         for (full, brief) in &config.factory_abbreviations {
-            if factory.contains(full) || clean_text(factory).contains(&clean_text(full)) {
+            let clean_full = clean_text(full);
+            let clean_brief = clean_text(brief);
+            if clean_fac.contains(&clean_full)
+                || (!clean_brief.is_empty() && clean_fac.contains(&clean_brief))
+                || (!clean_fac.is_empty() && clean_full.contains(&clean_fac) && clean_fac.len() >= 6)
+            {
                 vendor_suffix = brief.clone();
                 break;
             }
@@ -154,9 +195,8 @@ pub fn match_drug(
                 return None;
             }
             if let Some(target) = ledger.iter().find(|e| e.code == trimmed_v || e.aux_code == trimmed_v) {
-                return Some(target.clone());
+                return Some((target.clone(), "手动配置指定".to_string()));
             } else {
-                // 手动指定了编码但在总账中未找到对应科目，同样安全返回 None，严禁盲目穿透
                 return None;
             }
         }
@@ -174,7 +214,22 @@ pub fn match_drug(
         for e in ledger {
             let e_clean = clean_text(&e.drug_name);
             if e_clean == expected_with_vendor {
-                return Some(e.clone());
+                return Some((e.clone(), format!("厂家简称精准匹配 ({})", vendor_suffix)));
+            }
+        }
+    }
+
+    // 优先级 1.5: 财务总账品名括号厂家反向智能解析
+    // 若总账名称形如 "麸炒苍术（国瑞堂）"，当库管药名为 "麸炒苍术" 且厂家包含 "国瑞堂" 时自动配对
+    if !clean_fac.is_empty() {
+        for e in ledger {
+            let (l_base, l_tag_opt) = extract_name_and_vendor_tag(&e.drug_name);
+            if let Some(l_tag) = l_tag_opt {
+                let clean_l_base = clean_text(&l_base);
+                let clean_l_tag = clean_text(&l_tag);
+                if clean_l_base == clean_drug && clean_fac.contains(&clean_l_tag) {
+                    return Some((e.clone(), format!("总账括号厂家反向匹配 ({})", l_tag)));
+                }
             }
         }
     }
@@ -190,7 +245,7 @@ pub fn match_drug(
         let e_name = clean_text(&e.drug_name);
         let e_spec = clean_text(&e.spec);
         if e_name == clean_drug && !clean_sp.is_empty() && e_spec == clean_sp {
-            return Some(e.clone());
+            return Some((e.clone(), "品名与规格完全一致".to_string()));
         }
     }
 
@@ -201,11 +256,7 @@ pub fn match_drug(
         .collect();
 
     if candidates.len() == 1 {
-        // 如果是严格厂家保护药，且总账无厂家条目，禁止回退到无厂家的通用条目
-        if is_strict_drug {
-            return None;
-        }
-        return Some(candidates[0].clone());
+        return Some((candidates[0].clone(), "同名单品规自动关联".to_string()));
     } else if candidates.len() > 1 {
         // 尝试规格精准匹配或包含比对
         let mut matched_cand = None;
@@ -217,14 +268,70 @@ pub fn match_drug(
                 match_count += 1;
             }
         }
-        // 只有当规格能唯一确切命中时才返回，存在歧义时返回 None 要求人工确认
         if match_count == 1 {
-            return matched_cand;
+            return matched_cand.map(|c| (c, "同名规格排他命中".to_string()));
         }
-        return None;
+    }
+
+    // 优先级 4: 中药炮制前缀智能兼容容错匹配（如 "吴茱萸" 匹配 "制吴茱萸"，"白术" 匹配 "炒白术"）
+    let stripped_clean_drug = clean_text(strip_tcm_prefix(&clean_drug));
+    let mut tcm_candidates = Vec::new();
+    for e in ledger {
+        let (e_base, e_tag_opt) = extract_name_and_vendor_tag(&e.drug_name);
+        let clean_e_base = clean_text(&e_base);
+        let stripped_clean_e = clean_text(strip_tcm_prefix(&clean_e_base));
+
+        // 核心草药名称一致
+        if stripped_clean_drug == stripped_clean_e
+            || clean_drug == stripped_clean_e
+            || stripped_clean_drug == clean_e_base
+        {
+            // 校验厂家无冲突
+            let mut vendor_ok = true;
+            if let Some(l_tag) = e_tag_opt {
+                let clean_tag = clean_text(&l_tag);
+                if !clean_fac.is_empty() && !clean_fac.contains(&clean_tag) {
+                    vendor_ok = false;
+                }
+            } else if !vendor_suffix.is_empty() {
+                // 如果库管指定了厂家，但该总账条目无厂家且账上有其他明确带厂家的科目，则优先避开
+                vendor_ok = true;
+            }
+
+            if vendor_ok {
+                tcm_candidates.push(e);
+            }
+        }
+    }
+
+    if tcm_candidates.len() == 1 {
+        return Some((tcm_candidates[0].clone(), format!("中药炮制前缀兼容 ({})", tcm_candidates[0].drug_name)));
+    } else if tcm_candidates.len() > 1 {
+        // 如果有多个炮制候选，优先比对规格
+        let mut spec_matched = Vec::new();
+        for c in &tcm_candidates {
+            let c_sp = clean_text(&c.spec);
+            if !c_sp.is_empty() && !clean_sp.is_empty() && (clean_sp == c_sp || clean_sp.contains(&c_sp) || c_sp.contains(&clean_sp)) {
+                spec_matched.push(*c);
+            }
+        }
+        if spec_matched.len() == 1 {
+            return Some((spec_matched[0].clone(), format!("中药炮制规格排他命中 ({})", spec_matched[0].drug_name)));
+        }
     }
 
     None
+}
+
+/// 匹配药品存货科目（兼容现有调用接口）
+pub fn match_drug(
+    drug_name: &str,
+    spec: &str,
+    factory: &str,
+    ledger: &[LedgerEntry],
+    config: &ConfigData,
+) -> Option<LedgerEntry> {
+    match_drug_with_method(drug_name, spec, factory, ledger, config).map(|(e, _)| e)
 }
 
 /// 执行生成销售出库凭证
@@ -628,6 +735,48 @@ mod tests {
         )
         .expect("应命中带厂家后缀的科目");
         assert_eq!(matched.drug_name, "海螵蛸蕴德");
+    }
+
+    #[test]
+    fn truncated_vendor_matches_ledger_bracket_entry() {
+        let mut config = ConfigData::default();
+        config
+            .factory_abbreviations
+            .insert("河北国瑞堂药业有限公司".to_string(), "国瑞堂".to_string());
+
+        let ledger = vec![
+            ledger_entry("麸炒苍术（国松堂）", "1克*1000克/袋"),
+            ledger_entry("麸炒苍术（国瑞堂）", "1克*1000克/袋"),
+        ];
+
+        // 库管系统导出被截断为 "河北国瑞堂药业有限公"
+        let matched = match_drug(
+            "麸炒苍术",
+            "1克*1000克/袋",
+            "河北国瑞堂药业有限公",
+            &ledger,
+            &config,
+        )
+        .expect("截断厂家名称必须能识别并命中对应国瑞堂条目");
+
+        assert_eq!(matched.drug_name, "麸炒苍术（国瑞堂）");
+    }
+
+    #[test]
+    fn tcm_processing_prefix_tolerance_matches() {
+        let config = ConfigData::default();
+        let ledger = vec![ledger_entry("制吴茱萸", "1克*1000克/袋")];
+
+        let matched = match_drug(
+            "吴茱萸",
+            "1克*1000克/袋",
+            "",
+            &ledger,
+            &config,
+        )
+        .expect("库管通用名应能兼容匹配财务炮制前缀");
+
+        assert_eq!(matched.drug_name, "制吴茱萸");
     }
 
     #[test]

@@ -117,7 +117,8 @@ def load_ledger_inventory(ledger_path):
         all_items.append(record)
         if code.startswith('1201_XY'):
             items_by_cat['XY'].append(record)
-        elif code.startswith('1201_ZY'):
+        elif code.startswith('1201_ZY') or code.startswith('1201_KL'):
+            # 中药房包含 1201_ZY (饮片) 和 1201_KL (配方颗粒)
             items_by_cat['ZY'].append(record)
         elif code.startswith('1201_HC'):
             items_by_cat['HC'].append(record)
@@ -270,11 +271,28 @@ def compare_single_category(ledger_candidates, wh_items, category_name, factory_
     
     # 建立财务总账索引
     ledger_pool = [it.copy() for it in ledger_candidates]
+    tcm_prefixes = ("制", "炒", "麸炒", "炙", "煅", "酒", "醋", "生", "清", "法", "姜", "焦", "蜜炙", "盐", "熟")
+
+    def strip_tcm(name_str):
+        for p in tcm_prefixes:
+            if name_str.startswith(p) and len(name_str) > len(p):
+                return name_str[len(p):]
+        return name_str
 
     for wh_it in wh_items:
         c_wh_name = clean_text(wh_it['name'])
         c_wh_spec = clean_text(wh_it['spec'])
-        factory_brief = abbr_map.get(wh_it['factory'], '')
+        c_wh_fac = clean_text(wh_it.get('factory', ''))
+
+        # 智能提取厂家简称（三维容错：直接包含简称、包含全称、全称包含截断）
+        factory_brief = ''
+        if c_wh_fac:
+            for full_f, brief_f in abbr_map.items():
+                c_full = clean_text(full_f)
+                c_brief = clean_text(brief_f)
+                if c_wh_fac in c_full or c_full in c_wh_fac or (c_brief and c_brief in c_wh_fac):
+                    factory_brief = brief_f
+                    break
 
         best_match = None
 
@@ -288,6 +306,19 @@ def compare_single_category(ledger_candidates, wh_items, category_name, factory_
                 if target_with_fac in c_l_raw and (not c_wh_spec or c_wh_spec in c_l_raw):
                     best_match = l_it
                     break
+
+        # 1.5 财务品名括号厂家反向智能解析
+        if not best_match and c_wh_fac:
+            for l_it in ledger_pool:
+                if l_it['matched']:
+                    continue
+                m = re.search(r'[（\(]([^\)）]+)[）\)]', l_it['raw_name'])
+                if m:
+                    tag = clean_text(m.group(1))
+                    l_base = clean_text(re.sub(r'[（\(][^\)）]+[）\)]', '', l_it['raw_name']).replace('存货_', '').split()[0])
+                    if l_base == c_wh_name and tag in c_wh_fac:
+                        best_match = l_it
+                        break
 
         # 2. 检查严格厂家锁定药品（如海螵蛸），若未带指定厂家则禁止盲目回退
         is_strict = any(s in wh_it['name'] for s in strict_drugs)
@@ -310,7 +341,19 @@ def compare_single_category(ledger_candidates, wh_items, category_name, factory_
                 if l_it['matched']:
                     continue
                 c_l_raw = clean_text(l_it['raw_name'])
-                if c_wh_name in c_l_raw and c_wh_spec in c_l_raw:
+                if c_wh_name in c_l_raw and (c_wh_spec in c_l_raw or not c_wh_spec):
+                    best_match = l_it
+                    break
+
+        # 4. 中药炮制前缀智能兼容匹配 (如 "吴茱萸" 匹配 "制吴茱萸")
+        if not best_match and not is_strict:
+            stripped_wh = strip_tcm(c_wh_name)
+            for l_it in ledger_pool:
+                if l_it['matched']:
+                    continue
+                c_l_name = clean_text(l_it['name'])
+                stripped_l = strip_tcm(c_l_name)
+                if stripped_wh == stripped_l or c_wh_name == stripped_l or stripped_wh == c_l_name:
                     best_match = l_it
                     break
 

@@ -232,6 +232,48 @@ fn execute_inbound_voucher(
 }
 
 #[tauri::command]
+fn preview_inventory_audit_mapping(
+    app: tauri::AppHandle,
+    ledger: String,
+    west: Option<String>,
+    tcm: Option<String>,
+    hc: Option<String>,
+    config: Option<String>,
+) -> Result<Value, String> {
+    let (cfg, _) = load_runtime_config(&app, config.as_deref());
+    match core::audit::preview_inventory_audit_mapping(
+        &ledger,
+        west.as_deref(),
+        tcm.as_deref(),
+        hc.as_deref(),
+        &cfg,
+    ) {
+        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
+        Err(err) => Ok(json!({ "success": false, "error": err })),
+    }
+}
+
+#[tauri::command]
+fn execute_inventory_audit_with_mapping(
+    app: tauri::AppHandle,
+    ledger: String,
+    confirmed_items: Vec<core::audit::ConfirmedAuditMappingItem>,
+    output: Option<String>,
+    config: Option<String>,
+) -> Result<Value, String> {
+    let (cfg, _) = load_runtime_config(&app, config.as_deref());
+    match core::audit::execute_inventory_audit_with_mapping(
+        &ledger,
+        confirmed_items,
+        output.as_deref(),
+        &cfg,
+    ) {
+        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
+        Err(err) => Ok(json!({ "success": false, "error": err })),
+    }
+}
+
+#[tauri::command]
 fn execute_inventory_audit(
     app: tauri::AppHandle,
     ledger: String,
@@ -360,6 +402,8 @@ pub fn run() {
             execute_outbound_voucher,
             execute_inbound_voucher,
             execute_inventory_audit,
+            preview_inventory_audit_mapping,
+            execute_inventory_audit_with_mapping,
             get_config,
             save_config,
             open_in_system,
