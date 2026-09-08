@@ -1,5 +1,5 @@
 use crate::core::config::{clean_text, ConfigData};
-use crate::core::models::LedgerEntry;
+use crate::core::models::{ConfirmedLedgerMapping, LedgerCandidateOption, LedgerEntry};
 
 /// 常用中药炮制前缀列表。
 const TCM_PREFIXES: &[&str] = &[
@@ -243,4 +243,173 @@ pub fn match_drug(
     config: &ConfigData,
 ) -> Option<LedgerEntry> {
     match_drug_with_method(drug_name, spec, factory, ledger, config).map(|(entry, _)| entry)
+}
+
+fn to_candidate_option(entry: &LedgerEntry) -> LedgerCandidateOption {
+    LedgerCandidateOption {
+        code: entry.code.clone(),
+        name: entry.name_full.clone(),
+        spec: entry.spec.clone(),
+        qty: entry.end_qty,
+        price: entry.price,
+        amount: entry.end_amount,
+    }
+}
+
+/// 为药品生成人工选择候选项。
+///
+/// 优先返回品名包含关系命中的总账科目，最多 15 个；不足 25 个时再按
+/// 总账原有顺序补足，保证用户在严格厂家匹配失败时仍能手工选择正确科目。
+pub fn build_ledger_candidates(
+    warehouse_name: &str,
+    ledger_entries: &[LedgerEntry],
+) -> Vec<LedgerCandidateOption> {
+    let clean_name = clean_text(warehouse_name);
+    let mut candidates: Vec<LedgerCandidateOption> = ledger_entries
+        .iter()
+        .filter(|entry| {
+            if clean_name.is_empty() {
+                return false;
+            }
+            let clean_entry_name = clean_text(&entry.drug_name);
+            clean_entry_name.contains(&clean_name) || clean_name.contains(&clean_entry_name)
+        })
+        .take(15)
+        .map(to_candidate_option)
+        .collect();
+
+    if candidates.len() < 25 {
+        for entry in ledger_entries {
+            if candidates.len() >= 25 {
+                break;
+            }
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.code == entry.code)
+            {
+                candidates.push(to_candidate_option(entry));
+            }
+        }
+    }
+
+    candidates
+}
+
+/// 查找前端已经确认的人工科目。
+///
+/// 人工选择优先于自动匹配，因此即使自动规则因厂家保护或配置覆盖返回
+/// `None`，只要用户选择的是当前总账中的有效完整编码，凭证也可以正常关联。
+pub fn find_confirmed_ledger_entry(
+    item_id: usize,
+    confirmed_mappings: Option<&[ConfirmedLedgerMapping]>,
+    ledger_entries: &[LedgerEntry],
+) -> Option<LedgerEntry> {
+    let mapping = confirmed_mappings?
+        .iter()
+        .find(|mapping| mapping.id == item_id)?;
+    let code = mapping.ledger_code.trim();
+    if code.is_empty() {
+        return None;
+    }
+
+    ledger_entries
+        .iter()
+        .find(|entry| entry.code == code)
+        .cloned()
+}
+
+/// 解析一条凭证明细的总账科目，人工确认优先于自动规则。
+pub fn resolve_drug_match(
+    item_id: usize,
+    drug_name: &str,
+    spec: &str,
+    factory: &str,
+    ledger_entries: &[LedgerEntry],
+    config: &ConfigData,
+    confirmed_mappings: Option<&[ConfirmedLedgerMapping]>,
+) -> Option<LedgerEntry> {
+    find_confirmed_ledger_entry(item_id, confirmed_mappings, ledger_entries)
+        .or_else(|| match_drug(drug_name, spec, factory, ledger_entries, config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(code: &str, name: &str) -> LedgerEntry {
+        LedgerEntry {
+            code: code.to_string(),
+            aux_code: code.trim_start_matches("1201_").to_string(),
+            name_full: format!("存货_{} 规格", name),
+            drug_name: name.to_string(),
+            spec: "规格".to_string(),
+            price: 1.2,
+            end_qty: 3.0,
+            end_amount: 3.6,
+        }
+    }
+
+    #[test]
+    fn candidates_prioritize_name_related_entries() {
+        let ledger = vec![
+            entry("1201_OTHER", "维生素"),
+            entry("1201_MATCH", "阿莫西林"),
+        ];
+
+        let candidates = build_ledger_candidates("阿莫西林", &ledger);
+        assert_eq!(
+            candidates.first().map(|candidate| candidate.code.as_str()),
+            Some("1201_MATCH")
+        );
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn confirmed_mapping_requires_an_existing_full_code() {
+        let ledger = vec![entry("1201_MATCH", "阿莫西林")];
+        let mappings = vec![ConfirmedLedgerMapping {
+            id: 7,
+            ledger_code: "1201_MATCH".to_string(),
+        }];
+
+        assert_eq!(
+            find_confirmed_ledger_entry(7, Some(&mappings), &ledger).map(|matched| matched.code),
+            Some("1201_MATCH".to_string())
+        );
+        assert!(find_confirmed_ledger_entry(7, None, &ledger).is_none());
+        assert!(find_confirmed_ledger_entry(
+            7,
+            Some(&[ConfirmedLedgerMapping {
+                id: 7,
+                ledger_code: "MISSING".to_string(),
+            }]),
+            &ledger
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn confirmed_mapping_takes_priority_over_automatic_match() {
+        let ledger = vec![
+            entry("1201_AUTO", "阿莫西林"),
+            entry("1201_MANUAL", "另一种药"),
+        ];
+        let mappings = vec![ConfirmedLedgerMapping {
+            id: 2,
+            ledger_code: "1201_MANUAL".to_string(),
+        }];
+
+        let resolved = resolve_drug_match(
+            2,
+            "阿莫西林",
+            "规格",
+            "",
+            &ledger,
+            &ConfigData::default(),
+            Some(&mappings),
+        )
+        .expect("应返回人工指定的科目");
+
+        assert_eq!(resolved.code, "1201_MANUAL");
+    }
 }

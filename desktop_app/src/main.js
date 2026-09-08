@@ -43,7 +43,9 @@ const state = {
   auditPreview: null,
   previewCat: 'ALL',
   previewUnmatchedOnly: false,
-  previewSearch: ''
+  previewSearch: '',
+  outboundManualMappings: {},
+  inboundManualMappings: {}
 };
 
 // HTML 转义防注入
@@ -161,6 +163,7 @@ function setupDropzone(inputEl, wrapperEl) {
       if (f.name.endsWith('.xlsx') || f.name.endsWith('.xls')) {
         // 如果在 WebView 里有 path 属性则用 path，否则用 name
         inputEl.value = f.path || f.name;
+        delete inputEl.dataset.autoFilled;
         showToast(`已载入文件: ${f.name}`, 'info');
       } else {
         showToast('请拖入有效的 Excel 文件 (.xlsx 或 .xls)', 'warning');
@@ -175,8 +178,28 @@ function bindFilePicker(buttonId, inputEl, title) {
 
   button.onclick = async () => {
     const file = await pickExcelFile(title);
-    if (file) inputEl.value = file;
+    if (file) {
+      inputEl.value = file;
+      delete inputEl.dataset.autoFilled;
+    }
   };
+}
+
+function setAutoFilledFile(inputEl, path) {
+  if (!inputEl || !path) return;
+  inputEl.value = path;
+  inputEl.dataset.autoFilled = 'true';
+}
+
+function setManuallySelectedFile(inputEl, path) {
+  if (!inputEl || !path) return;
+  inputEl.value = path;
+  delete inputEl.dataset.autoFilled;
+}
+
+function findUniqueScannedFile(files, predicate = () => true) {
+  const matches = (Array.isArray(files) ? files : []).filter(predicate);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function invokeWithLoading(command, args, options = {}) {
@@ -265,40 +288,53 @@ function renderScanBanner(data) {
 }
 
 function autoFillDetectedFiles(data) {
+  const ledgerFiles = Array.isArray(data.ledger_files) ? data.ledger_files : [];
+  const templateFiles = Array.isArray(data.template_files) ? data.template_files : [];
+
   // 销售明细输入框
   const salesInput = document.getElementById('sales-input-file');
-  if (salesInput && !salesInput.value && data.sales_files.length > 0) {
-    salesInput.value = data.sales_files[0].path;
+  const rawSales = findUniqueScannedFile(data.sales_files, file => !file.name.includes('已汇总'));
+  if (salesInput && !salesInput.value && rawSales) {
+    setAutoFilledFile(salesInput, rawSales.path);
   }
 
   // 出库凭证输入框
   const obSales = document.getElementById('outbound-sales-file');
   const obLedger = document.getElementById('outbound-ledger-file');
   const obTmpl = document.getElementById('outbound-template-file');
-  if (obSales && !obSales.value && data.sales_files.length > 0) {
+  const rolledSales = findUniqueScannedFile(data.sales_files, file => file.name.includes('已汇总'));
+  if (obSales && !obSales.value && rolledSales) {
     // 优先选择带有“已汇总”字样的文件
-    const rolled = data.sales_files.find(f => f.name.includes('已汇总')) || data.sales_files[0];
-    obSales.value = rolled.path;
+    setAutoFilledFile(obSales, rolledSales.path);
   }
-  if (obLedger && !obLedger.value && data.ledger_files.length > 0) {
-    obLedger.value = data.ledger_files[0].path;
+  if (obLedger && !obLedger.value && ledgerFiles.length === 1) {
+    setAutoFilledFile(obLedger, ledgerFiles[0].path);
   }
-  if (obTmpl && !obTmpl.value && data.template_files.length > 0) {
-    obTmpl.value = data.template_files[0].path;
+  const outboundTemplate = findUniqueScannedFile(
+    templateFiles,
+    file => !file.name.includes('入库') && !file.name.includes('中药')
+  );
+  if (obTmpl && !obTmpl.value && outboundTemplate) {
+    setAutoFilledFile(obTmpl, outboundTemplate.path);
   }
 
   // 入库凭证输入框
   const inInbound = document.getElementById('inbound-file');
   const inLedger = document.getElementById('inbound-ledger-file');
   const inTmpl = document.getElementById('inbound-template-file');
-  if (inInbound && !inInbound.value && data.inbound_files.length > 0) {
-    inInbound.value = data.inbound_files[0].path;
+  const inboundFile = findUniqueScannedFile(data.inbound_files);
+  if (inInbound && !inInbound.value && inboundFile) {
+    setAutoFilledFile(inInbound, inboundFile.path);
   }
-  if (inLedger && !inLedger.value && data.ledger_files.length > 0) {
-    inLedger.value = data.ledger_files[0].path;
+  if (inLedger && !inLedger.value && ledgerFiles.length === 1) {
+    setAutoFilledFile(inLedger, ledgerFiles[0].path);
   }
-  if (inTmpl && !inTmpl.value && data.template_files.length > 0) {
-    inTmpl.value = data.template_files[0].path;
+  const inboundTemplate = findUniqueScannedFile(
+    templateFiles,
+    file => file.name.includes('入库') || file.name.includes('中药')
+  );
+  if (inTmpl && !inTmpl.value && inboundTemplate) {
+    setAutoFilledFile(inTmpl, inboundTemplate.path);
   }
 
   // 账实库存核对输入框
@@ -306,62 +342,75 @@ function autoFillDetectedFiles(data) {
   const cmpWest = document.getElementById('compare-west-file');
   const cmpTcm = document.getElementById('compare-tcm-file');
   const cmpHc = document.getElementById('compare-hc-file');
-  if (cmpLedger && !cmpLedger.value && data.ledger_files && data.ledger_files.length > 0) {
-    cmpLedger.value = data.ledger_files[0].path;
+  if (cmpLedger && !cmpLedger.value && ledgerFiles.length === 1) {
+    setAutoFilledFile(cmpLedger, ledgerFiles[0].path);
   }
-  if (cmpWest && !cmpWest.value && data.west_wh_files && data.west_wh_files.length > 0) {
-    cmpWest.value = data.west_wh_files[0].path;
+  const westFile = findUniqueScannedFile(data.west_wh_files);
+  if (cmpWest && !cmpWest.value && westFile) {
+    setAutoFilledFile(cmpWest, westFile.path);
   }
-  if (cmpTcm && !cmpTcm.value && data.tcm_wh_files && data.tcm_wh_files.length > 0) {
-    cmpTcm.value = data.tcm_wh_files[0].path;
+  const tcmFile = findUniqueScannedFile(data.tcm_wh_files);
+  if (cmpTcm && !cmpTcm.value && tcmFile) {
+    setAutoFilledFile(cmpTcm, tcmFile.path);
   }
-  if (cmpHc && !cmpHc.value && data.hc_wh_files && data.hc_wh_files.length > 0) {
-    cmpHc.value = data.hc_wh_files[0].path;
+  const hcFile = findUniqueScannedFile(data.hc_wh_files);
+  if (cmpHc && !cmpHc.value && hcFile) {
+    setAutoFilledFile(cmpHc, hcFile.path);
+  }
+
+  if (ledgerFiles.length > 1) {
+    [obLedger, inLedger, cmpLedger].forEach(input => {
+      if (input?.dataset.autoFilled === 'true') {
+        input.value = '';
+        delete input.dataset.autoFilled;
+      }
+    });
+    showToast('检测到多个总账文件：请按业务阶段手工选择对应文件，避免把入库前总账误用于出库。', 'warning', 7000);
   }
 }
 
 function applyScannedFileToActiveTab(item) {
   const name = item.name;
   if (state.activeTab === 'tab-sales') {
-    document.getElementById('sales-input-file').value = item.path;
+    setManuallySelectedFile(document.getElementById('sales-input-file'), item.path);
     showToast(`已选定销售表: ${name}`, 'info');
   } else if (state.activeTab === 'tab-outbound') {
-    if (name.includes('总账')) {
-      document.getElementById('outbound-ledger-file').value = item.path;
-      showToast(`已填入总账表: ${name}`, 'info');
+    if (name.includes('总账') || name.includes('数量金额')) {
+      setManuallySelectedFile(document.getElementById('outbound-ledger-file'), item.path);
+      showToast(`已填入出库前总账（入库后快照）: ${name}`, 'info');
     } else if (name.includes('模板')) {
-      document.getElementById('outbound-template-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('outbound-template-file'), item.path);
       showToast(`已填入凭证模板: ${name}`, 'info');
     } else {
-      document.getElementById('outbound-sales-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('outbound-sales-file'), item.path);
       showToast(`已填入销售汇总表: ${name}`, 'info');
     }
   } else if (state.activeTab === 'tab-inbound') {
-    if (name.includes('总账')) {
-      document.getElementById('inbound-ledger-file').value = item.path;
-      showToast(`已填入总账表: ${name}`, 'info');
+    if (name.includes('总账') || name.includes('数量金额')) {
+      setManuallySelectedFile(document.getElementById('inbound-ledger-file'), item.path);
+      showToast(`已填入入库前总账: ${name}`, 'info');
     } else if (name.includes('模板')) {
-      document.getElementById('inbound-template-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('inbound-template-file'), item.path);
       showToast(`已填入凭证模板: ${name}`, 'info');
     } else {
-      document.getElementById('inbound-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('inbound-file'), item.path);
       showToast(`已填入入库单: ${name}`, 'info');
     }
   } else if (state.activeTab === 'tab-compare') {
     if (name.includes('总账') || name.includes('数量金额')) {
-      document.getElementById('compare-ledger-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('compare-ledger-file'), item.path);
       showToast(`已填入财务总账: ${name}`, 'info');
     } else if (name.includes('西药')) {
-      document.getElementById('compare-west-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('compare-west-file'), item.path);
       showToast(`已填入西药房库存表: ${name}`, 'info');
     } else if (name.includes('中药')) {
-      document.getElementById('compare-tcm-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('compare-tcm-file'), item.path);
       showToast(`已填入中药房库存表: ${name}`, 'info');
     } else if (name.includes('耗材') || name.includes('材料')) {
-      document.getElementById('compare-hc-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('compare-hc-file'), item.path);
       showToast(`已填入耗材库库存表: ${name}`, 'info');
     } else {
-      document.getElementById('compare-west-file').value = item.path;
+      setManuallySelectedFile(document.getElementById('compare-west-file'), item.path);
       showToast(`已填入库管库存表: ${name}`, 'info');
     }
   }
@@ -393,8 +442,7 @@ function initTabSales() {
     const res = await invokeWithLoading('execute_sales_process', {
       file,
       output,
-      sheetName,
-      sheet_name: sheetName
+      sheetName
     }, {
       loadingMessage: '正在对销售明细进行去重、合并及多维度汇总计算...',
       errorPrefix: '销售汇总失败'
@@ -405,10 +453,11 @@ function initTabSales() {
     renderSalesResult(res);
     showToast('销售明细汇总处理完成！', 'success');
 
-    // 智能联动：如果出库凭证面板的销售表为空，自动同步带入新汇总的文件
+    // 智能联动：如果出库面板中的销售表仍是扫描自动填入的旧文件，则替换为本次新汇总结果；
+    // 用户手工选定的文件不覆盖。
     const obSales = document.getElementById('outbound-sales-file');
-    if (obSales && !obSales.value) {
-      obSales.value = res.output_file;
+    if (obSales && (!obSales.value || obSales.dataset.autoFilled === 'true')) {
+      setAutoFilledFile(obSales, res.output_file);
     }
   };
 
@@ -439,7 +488,7 @@ function renderSalesResult(data) {
 }
 
 // ----------------------------------------------------
-// 4. TAB 2: 销售出库凭证生成
+// 3. TAB 3: 销售出库凭证生成
 // ----------------------------------------------------
 function initTabOutbound() {
   const inSales = document.getElementById('outbound-sales-file');
@@ -448,16 +497,17 @@ function initTabOutbound() {
   const inDate = document.getElementById('outbound-date');
   const chkFallback = document.getElementById('outbound-fallback-price');
   const btnRun = document.getElementById('btn-run-outbound');
+  const btnManualRun = document.getElementById('btn-rerun-outbound-manual');
 
   bindFilePicker('btn-browse-outbound-sales', inSales, '选择销售汇总表');
-  bindFilePicker('btn-browse-outbound-ledger', inLedger, '选择数量金额总账表');
+  bindFilePicker('btn-browse-outbound-ledger', inLedger, '选择入库凭证导入后重新导出的数量金额总账表');
   bindFilePicker('btn-browse-outbound-template', inTemplate, '选择凭证导入模板');
 
   setupDropzone(inSales, inSales.closest('.file-input-wrapper'));
   setupDropzone(inLedger, inLedger.closest('.file-input-wrapper'));
   setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
 
-  btnRun.onclick = async () => {
+  const generateOutbound = async (confirmedItems, successMessage) => {
     const sales = inSales.value.trim();
     const ledger = inLedger.value.trim();
     const template = inTemplate.value.trim();
@@ -476,6 +526,7 @@ function initTabOutbound() {
       output: null,
       date: dateVal,
       fallbackPrice: fallback,
+      confirmedItems: confirmedItems || null,
       config: null
     }, {
       loadingMessage: '正在匹配总账存货编码与单价，生成销售出库凭证...',
@@ -486,8 +537,24 @@ function initTabOutbound() {
 
     state.lastOutputs.outbound = res.output_file;
     renderOutboundResult(res);
-    showToast('销售出库凭证生成成功！', 'success');
+    showToast(successMessage, 'success');
   };
+
+  btnRun.onclick = async () => {
+    state.outboundManualMappings = {};
+    await generateOutbound(null, '销售出库凭证生成成功！');
+  };
+
+  if (btnManualRun) {
+    btnManualRun.onclick = async () => {
+      const confirmedItems = collectConfirmedLedgerMappings(state.outboundManualMappings);
+      if (confirmedItems.length === 0) {
+        showToast('请先在未匹配列表中选择至少一个财务存货科目', 'warning');
+        return;
+      }
+      await generateOutbound(confirmedItems, `已按 ${confirmedItems.length} 项手工匹配重新生成出库凭证！`);
+    };
+  }
 
   document.getElementById('btn-open-outbound-file').onclick = () => {
     openSystemPath(state.lastOutputs.outbound);
@@ -588,6 +655,64 @@ function jumpToConfigWithDrug(drugName) {
   }
 }
 
+// 凭证未匹配项的人工科目选择：与账实核对预览使用同一份候选数据结构。
+function renderVoucherCandidateSelect(item, mappings) {
+  const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+  if (candidates.length === 0) {
+    return '<span style="color: var(--text-muted); font-size: 11px;">暂无候选科目</span>';
+  }
+
+  const itemId = String(item.id);
+  const selectedCode = mappings[itemId] || '';
+  let html = `<select class="candidate-select voucher-candidate-select" data-id="${escapeHtml(item.id)}" title="从总账候选中人工指定存货科目">`;
+  html += '<option value="">-- 选择财务存货科目 --</option>';
+  candidates.forEach(candidate => {
+    const code = candidate.code || '';
+    const name = candidate.name || '未命名科目';
+    const spec = candidate.spec ? ` ${candidate.spec}` : '';
+    const qty = candidate.qty ?? 0;
+    const selected = code === selectedCode ? ' selected' : '';
+    const label = `${name}${spec} (${code}) [期末:${qty}]`;
+    html += `<option value="${escapeHtml(code)}"${selected}>${escapeHtml(label)}</option>`;
+  });
+  html += '</select>';
+  return html;
+}
+
+function collectConfirmedLedgerMappings(mappings) {
+  return Object.entries(mappings || {})
+    .map(([id, ledgerCode]) => ({
+      id: Number(id),
+      ledger_code: String(ledgerCode || '').trim()
+    }))
+    .filter(item => Number.isInteger(item.id) && item.id >= 0 && item.ledger_code);
+}
+
+function updateVoucherManualButton(buttonId, mappings, visible) {
+  const button = document.getElementById(buttonId);
+  if (!button) return;
+  button.classList.toggle('hidden', !visible);
+  button.disabled = collectConfirmedLedgerMappings(mappings).length === 0;
+}
+
+function bindVoucherManualSelectors(tableId, stateKey, buttonId) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+
+  table.querySelectorAll('.voucher-candidate-select').forEach(select => {
+    select.onchange = () => {
+      const itemId = String(parseInt(select.dataset.id, 10));
+      const selectedCode = select.value.trim();
+      if (selectedCode) {
+        state[stateKey][itemId] = selectedCode;
+      } else {
+        delete state[stateKey][itemId];
+      }
+      updateVoucherManualButton(buttonId, state[stateKey], true);
+    };
+  });
+}
+
 function renderOutboundResult(data) {
   const box = document.getElementById('outbound-result');
   box.classList.remove('hidden');
@@ -597,6 +722,13 @@ function renderOutboundResult(data) {
   document.getElementById('stat-outbound-matched').textContent = data.matched_count?.toLocaleString() || '-';
   document.getElementById('stat-outbound-unmatched').textContent = data.unmatched_count?.toLocaleString() || '0';
   document.getElementById('stat-outbound-amt').textContent = formatMoney(data.total_credit_amt);
+  const depletionSummary = document.getElementById('outbound-depletion-summary');
+  if (depletionSummary) {
+    const full = data.fully_depleted_count ?? 0;
+    const partial = data.partially_depleted_count ?? 0;
+    const tail = formatMoney(data.tail_adjustment_amt ?? 0);
+    depletionSummary.textContent = `库存状态：${full} 个品规本次出库后数量清零，${partial} 个品规部分出库；已将清零品规的总账尾差摊入其最后一笔出库，尾差调整合计 ${tail}。`;
+  }
 
   // 未匹配新药表格
   const unmatchedBox = document.getElementById('outbound-unmatched-box');
@@ -620,26 +752,41 @@ function renderOutboundResult(data) {
         <td style="font-family: monospace;">${escapeHtml(item.qty)}</td>
         <td style="font-family: monospace;">${item.in_price !== null ? '¥ ' + escapeHtml(item.in_price) : '-'}</td>
         <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
-        <td style="text-align: center;">
-          <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
-            + 配置编码
-          </button>
+        <td>
+          <div class="manual-match-cell">
+            ${renderVoucherCandidateSelect(item, state.outboundManualMappings)}
+            <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
+              去配置中心
+            </button>
+          </div>
         </td>
       `;
       tr.querySelector('.btn-jump-config').onclick = () => jumpToConfigWithDrug(drugDisplayName);
       tbody.appendChild(tr);
     });
 
+    bindVoucherManualSelectors(
+      'outbound-unmatched-table',
+      'outboundManualMappings',
+      'btn-rerun-outbound-manual'
+    );
+    updateVoucherManualButton(
+      'btn-rerun-outbound-manual',
+      state.outboundManualMappings,
+      true
+    );
+
     // 绑定导出与复制按钮
     document.getElementById('btn-copy-outbound-unmatched').onclick = () => copyUnmatchedToClipboard(unmatched);
     document.getElementById('btn-export-outbound-unmatched').onclick = () => exportUnmatchedToCsv(unmatched, '销售出库未建档药品清单.csv');
   } else {
     unmatchedBox.classList.add('hidden');
+    updateVoucherManualButton('btn-rerun-outbound-manual', state.outboundManualMappings, false);
   }
 }
 
 // ----------------------------------------------------
-// 5. TAB 3: 药房入库凭证生成 (西药 / 中药)
+// 2. TAB 2: 药房入库凭证生成 (西药 / 中药)
 // ----------------------------------------------------
 function initTabInbound() {
   const inInbound = document.getElementById('inbound-file');
@@ -648,16 +795,17 @@ function initTabInbound() {
   const inVoucherNo = document.getElementById('inbound-voucher-no');
   const inDate = document.getElementById('inbound-date');
   const btnRun = document.getElementById('btn-run-inbound');
+  const btnManualRun = document.getElementById('btn-rerun-inbound-manual');
 
   bindFilePicker('btn-browse-inbound', inInbound, '选择药品入库单 (西药或中药)');
-  bindFilePicker('btn-browse-inbound-ledger', inLedger, '选择数量金额总账表');
+  bindFilePicker('btn-browse-inbound-ledger', inLedger, '选择入库凭证生成前的数量金额总账表');
   bindFilePicker('btn-browse-inbound-template', inTemplate, '选择凭证导入模板');
 
   setupDropzone(inInbound, inInbound.closest('.file-input-wrapper'));
   setupDropzone(inLedger, inLedger.closest('.file-input-wrapper'));
   setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
 
-  btnRun.onclick = async () => {
+  const generateInbound = async (confirmedItems, successMessage) => {
     const inbound = inInbound.value.trim();
     const ledger = inLedger.value.trim();
     const template = inTemplate.value.trim();
@@ -676,6 +824,7 @@ function initTabInbound() {
       output: null,
       date: dateVal,
       voucherNo,
+      confirmedItems: confirmedItems || null,
       config: null
     }, {
       loadingMessage: '正在解析入库单据、匹配供应商与存货编码并进行借贷平衡审计...',
@@ -686,8 +835,24 @@ function initTabInbound() {
 
     state.lastOutputs.inbound = res.output_file;
     renderInboundResult(res);
-    showToast('药房入库凭证生成成功！', 'success');
+    showToast(successMessage, 'success');
   };
+
+  btnRun.onclick = async () => {
+    state.inboundManualMappings = {};
+    await generateInbound(null, '药房入库凭证生成成功！');
+  };
+
+  if (btnManualRun) {
+    btnManualRun.onclick = async () => {
+      const confirmedItems = collectConfirmedLedgerMappings(state.inboundManualMappings);
+      if (confirmedItems.length === 0) {
+        showToast('请先在未匹配列表中选择至少一个财务存货科目', 'warning');
+        return;
+      }
+      await generateInbound(confirmedItems, `已按 ${confirmedItems.length} 项手工匹配重新生成入库凭证！`);
+    };
+  }
 
   document.getElementById('btn-open-inbound-file').onclick = () => {
     openSystemPath(state.lastOutputs.inbound);
@@ -769,21 +934,36 @@ function renderInboundResult(data) {
         <td style="font-family: monospace;">¥ ${escapeHtml(item.in_price)}</td>
         <td style="font-family: monospace; font-weight: 600;">${formatMoney(item.in_amt)}</td>
         <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
-        <td style="text-align: center;">
-          <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
-            + 配置编码
-          </button>
+        <td>
+          <div class="manual-match-cell">
+            ${renderVoucherCandidateSelect(item, state.inboundManualMappings)}
+            <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
+              去配置中心
+            </button>
+          </div>
         </td>
       `;
       tr.querySelector('.btn-jump-config').onclick = () => jumpToConfigWithDrug(drugDisplayName);
       tbody.appendChild(tr);
     });
 
+    bindVoucherManualSelectors(
+      'inbound-unmatched-table',
+      'inboundManualMappings',
+      'btn-rerun-inbound-manual'
+    );
+    updateVoucherManualButton(
+      'btn-rerun-inbound-manual',
+      state.inboundManualMappings,
+      true
+    );
+
     // 绑定导出与复制按钮
     document.getElementById('btn-copy-inbound-unmatched').onclick = () => copyUnmatchedToClipboard(unmatched);
     document.getElementById('btn-export-inbound-unmatched').onclick = () => exportUnmatchedToCsv(unmatched, '药品入库未建档药品清单.csv');
   } else {
     unmatchedBox.classList.add('hidden');
+    updateVoucherManualButton('btn-rerun-inbound-manual', state.inboundManualMappings, false);
   }
 }
 
@@ -1047,7 +1227,7 @@ function initTabCompare() {
         previewCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
 
-      showToast(`智能识别完成：共 ${res.total_wh_items} 个品规，已自动匹配 ${res.matched_count} 个（${res.match_rate}%），识别项已默认自动勾选！`, 'success');
+      showToast(`智能识别完成：共 ${res.total_items} 个品规，已自动匹配 ${res.matched_count} 个（${res.match_rate}%），识别项已默认自动勾选！`, 'success');
     };
   }
 
@@ -1195,7 +1375,7 @@ function initTabCompare() {
               item.ledger_code = cand.code;
               item.ledger_name = cand.name;
               item.ledger_qty = cand.qty;
-              item.ledger_amount = cand.amt;
+              item.ledger_amount = cand.amount;
               item.matched = true;
               item.checked = true;
               item.match_method = '人工指定';
@@ -1483,10 +1663,10 @@ function renderCompareTable() {
     let rowClass = '';
 
     if (r.status === 'EQUAL') {
-      statusTag = '<span class="status-tag status-equal">数量完全吻合</span>';
+      statusTag = `<span class="status-tag status-equal">${escapeHtml(r.status_desc || '数量和金额均吻合')}</span>`;
       rowClass = 'row-equal';
-    } else if (r.status === 'DIFF_QTY') {
-      statusTag = '<span class="status-tag status-diff">存在数量差异</span>';
+    } else if (r.status === 'DIFF' || r.status === 'DIFF_QTY') {
+      statusTag = `<span class="status-tag status-diff">${escapeHtml(r.status_desc || '存在数量/金额差异')}</span>`;
       rowClass = 'row-diff';
     } else if (r.status === 'LEDGER_ONLY') {
       statusTag = '<span class="status-tag status-ledger-only">仅财务有结存</span>';

@@ -205,7 +205,7 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn execute_sales_process(
     file: String,
     output: Option<String>,
@@ -218,7 +218,7 @@ fn execute_sales_process(
     ))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 fn execute_outbound_voucher(
     app: tauri::AppHandle,
@@ -228,6 +228,7 @@ fn execute_outbound_voucher(
     output: Option<String>,
     date: Option<String>,
     fallback_price: Option<bool>,
+    confirmed_items: Option<Vec<core::models::ConfirmedLedgerMapping>>,
     config: Option<String>,
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
@@ -239,11 +240,12 @@ fn execute_outbound_voucher(
             date.as_deref(),
             fallback_price.unwrap_or(true),
             cfg,
+            confirmed_items.as_deref(),
         )
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 fn execute_inbound_voucher(
     app: tauri::AppHandle,
@@ -253,6 +255,7 @@ fn execute_inbound_voucher(
     output: Option<String>,
     date: Option<String>,
     voucher_no: Option<String>,
+    confirmed_items: Option<Vec<core::models::ConfirmedLedgerMapping>>,
     config: Option<String>,
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
@@ -264,6 +267,7 @@ fn execute_inbound_voucher(
             date.as_deref(),
             voucher_no.as_deref(),
             cfg,
+            confirmed_items.as_deref(),
         )
     })
 }
@@ -288,7 +292,7 @@ fn preview_inventory_audit_mapping(
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn execute_inventory_audit_with_mapping(
     app: tauri::AppHandle,
     ledger: String,
@@ -513,5 +517,12 @@ mod tests {
                 + audit_res.overall.ledger_only_count
         );
         assert!((0.0..=100.0).contains(&audit_res.overall.match_rate));
+        let historical_balance = audit_res
+            .categories
+            .iter()
+            .flat_map(|category| category.records.iter())
+            .find(|record| record.ledger_code == "1201_XY0014")
+            .expect("审计结果应保留历史数量为 0 但金额非 0 的总账记录");
+        assert_eq!(historical_balance.ledger_amt, 5.21);
     }
 }

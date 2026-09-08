@@ -316,6 +316,11 @@ body {
   margin-top: 4px;
 }
 
+.result-note {
+  margin: 14px 2px 0;
+  color: #a5f3fc;
+}
+
 /* 卡片与表单 */
 .card-grid {
   display: grid;
@@ -1141,6 +1146,27 @@ body {
 .unmatched-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.manual-match-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 250px;
+}
+
+.manual-match-cell .candidate-select {
+  min-width: 210px;
+  max-width: 320px;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .diag-tag {
@@ -1381,5 +1407,3 @@ body {
 #compare-preview-table tbody tr:hover {
   background: rgba(255, 255, 255, 0.04);
 }
-
-

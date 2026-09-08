@@ -1,10 +1,10 @@
-use crate::core::config::{clean_text, ConfigData};
+use crate::core::config::ConfigData;
 use crate::core::excel_utils::{
-    amount_or_product, find_header_row, is_summary_row, optional_col, read_sheet_rows,
-    required_col, row_as_f64, row_as_string,
+    amount_or_product, cents_to_currency, currency_cents, find_header_row, is_summary_row,
+    optional_col, read_sheet_rows, required_col, row_as_f64, row_as_string,
 };
 pub use crate::core::ledger::load_categorized_ledger;
-use crate::core::matching::match_drug_with_method;
+use crate::core::matching::{build_ledger_candidates, match_drug_with_method};
 use crate::core::models::LedgerEntry;
 use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook, Worksheet};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub category: String,
-    pub status: String,      // EQUAL, DIFF_QTY, WH_ONLY, LEDGER_ONLY
-    pub status_desc: String, // 数量完全吻合, 存在数量差异, 仅财务有结存, 仅库管有在库
+    pub status: String,      // EQUAL, DIFF, WH_ONLY, LEDGER_ONLY
+    pub status_desc: String, // 数量和金额吻合/存在差异, 仅财务有结存, 仅库管有在库
     pub name: String,
     pub spec: String,
     pub factory: String,
@@ -71,15 +71,8 @@ pub struct WarehouseItem {
     pub amount: f64,
 }
 
-/// 供前端手动下拉选择的候选总账条目
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LedgerCandidateOption {
-    pub code: String,
-    pub name: String,
-    pub spec: String,
-    pub qty: f64,
-    pub price: f64,
-}
+// 保留旧的模块路径，避免外部调用方因公共类型迁移而立即失效。
+pub use crate::core::models::LedgerCandidateOption;
 
 /// 第一步：智能识别映射项（前端预览与确认）
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -181,7 +174,11 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
         let unit = row_as_string(row, col_unit);
         let qty = row_as_f64(row, col_qty);
         let price = row_as_f64(row, col_price);
-        let amount = amount_or_product(row_as_f64(row, col_amt), qty, price);
+        let amount = cents_to_currency(currency_cents(amount_or_product(
+            row_as_f64(row, col_amt),
+            qty,
+            price,
+        )));
 
         items.push(WarehouseItem {
             name,
@@ -206,41 +203,7 @@ fn build_mapping_item(
 ) -> AuditMappingItem {
     let matched_res = match_drug_with_method(&w.name, &w.spec, &w.factory, ledger_entries, config);
 
-    // 筛选前 25 个候选（优先品名相关的候选）
-    let clean_w_name = clean_text(&w.name);
-    let mut relevant_cands: Vec<LedgerCandidateOption> = ledger_entries
-        .iter()
-        .filter(|e| {
-            let c_name = clean_text(&e.drug_name);
-            c_name.contains(&clean_w_name) || clean_w_name.contains(&c_name)
-        })
-        .take(15)
-        .map(|e| LedgerCandidateOption {
-            code: e.code.clone(),
-            name: e.name_full.clone(),
-            spec: e.spec.clone(),
-            qty: e.end_qty,
-            price: e.price,
-        })
-        .collect();
-
-    // 如果相关候选不足，补充其它同类条目至多 25 个
-    if relevant_cands.len() < 25 {
-        for e in ledger_entries {
-            if relevant_cands.len() >= 25 {
-                break;
-            }
-            if !relevant_cands.iter().any(|c| c.code == e.code) {
-                relevant_cands.push(LedgerCandidateOption {
-                    code: e.code.clone(),
-                    name: e.name_full.clone(),
-                    spec: e.spec.clone(),
-                    qty: e.end_qty,
-                    price: e.price,
-                });
-            }
-        }
-    }
+    let relevant_cands = build_ledger_candidates(&w.name, ledger_entries);
 
     let (
         matched,
@@ -252,7 +215,7 @@ fn build_mapping_item(
         ledger_price,
         ledger_amount,
     ) = if let Some((entry, method)) = matched_res {
-        let ledger_amount = (entry.end_qty * entry.price * 100.0).round() / 100.0;
+        let ledger_amount = cents_to_currency(currency_cents(entry.end_amount));
         (
             true,
             true,
@@ -411,14 +374,21 @@ pub fn execute_inventory_audit_with_mapping(
                 matched_ledger_codes.insert(m.code.clone());
                 let l_qty = m.end_qty;
                 let l_price = m.price;
-                let l_amt = (l_qty * l_price * 100.0).round() / 100.0;
+                // 总账期末金额可能包含历史尾差，不能重新用“数量 × 单价”覆盖。
+                let l_amt = cents_to_currency(currency_cents(m.end_amount));
                 let diff_qty = ((l_qty - it.wh_qty) * 100.0).round() / 100.0;
-                let diff_amt = ((l_amt - it.wh_amount) * 100.0).round() / 100.0;
+                let diff_amt = cents_to_currency(currency_cents(l_amt - it.wh_amount));
 
-                let (status, status_desc) = if diff_qty.abs() < 0.001 {
-                    ("EQUAL".to_string(), "数量完全吻合".to_string())
+                let qty_equal = diff_qty.abs() < 0.001;
+                let amount_equal = diff_amt.abs() < 0.01;
+                let (status, status_desc) = if qty_equal && amount_equal {
+                    ("EQUAL".to_string(), "数量和金额均吻合".to_string())
+                } else if !qty_equal && !amount_equal {
+                    ("DIFF".to_string(), "数量和金额均有差异".to_string())
+                } else if !qty_equal {
+                    ("DIFF".to_string(), "存在数量差异".to_string())
                 } else {
-                    ("DIFF_QTY".to_string(), "存在数量差异".to_string())
+                    ("DIFF".to_string(), "存在金额差异".to_string())
                 };
 
                 records.push(AuditRecord {
@@ -466,7 +436,7 @@ pub fn execute_inventory_audit_with_mapping(
         // 2. 处理仅财务有结存的项目
         for l in *ledger_list {
             if !matched_ledger_codes.contains(&l.code) {
-                let l_amt = (l.end_qty * l.price * 100.0).round() / 100.0;
+                let l_amt = cents_to_currency(currency_cents(l.end_amount));
                 records.push(AuditRecord {
                     category: cat_name.to_string(),
                     status: "LEDGER_ONLY".to_string(),
@@ -491,10 +461,13 @@ pub fn execute_inventory_audit_with_mapping(
 
         let total_items = records.len();
         let equal_count = records.iter().filter(|r| r.status == "EQUAL").count();
-        let diff_count = records.iter().filter(|r| r.status == "DIFF_QTY").count();
+        let diff_count = records.iter().filter(|r| r.status == "DIFF").count();
         let wh_only_count = records.iter().filter(|r| r.status == "WH_ONLY").count();
         let ledger_only_count = records.iter().filter(|r| r.status == "LEDGER_ONLY").count();
-        let total_diff_amt = records.iter().map(|r| r.diff_amt).sum::<f64>();
+        let total_diff_amt_cents: i64 = records
+            .iter()
+            .map(|record| currency_cents(record.diff_amt))
+            .sum();
         let match_rate = if total_items > 0 {
             ((equal_count as f64 / total_items as f64) * 1000.0).round() / 10.0
         } else {
@@ -510,7 +483,7 @@ pub fn execute_inventory_audit_with_mapping(
                 wh_only_count,
                 ledger_only_count,
                 match_rate,
-                total_diff_amt: (total_diff_amt * 100.0).round() / 10.0,
+                total_diff_amt: cents_to_currency(total_diff_amt_cents),
             },
             records,
         });
@@ -526,7 +499,10 @@ pub fn execute_inventory_audit_with_mapping(
     let grand_diff = categories.iter().map(|c| c.summary.diff_count).sum();
     let grand_wh_only = categories.iter().map(|c| c.summary.wh_only_count).sum();
     let grand_ledger_only = categories.iter().map(|c| c.summary.ledger_only_count).sum();
-    let grand_diff_amt: f64 = categories.iter().map(|c| c.summary.total_diff_amt).sum();
+    let grand_diff_amt_cents: i64 = categories
+        .iter()
+        .map(|category| currency_cents(category.summary.total_diff_amt))
+        .sum();
     let overall_rate = if grand_total > 0 {
         ((grand_equal as f64 / grand_total as f64) * 1000.0).round() / 10.0
     } else {
@@ -540,7 +516,7 @@ pub fn execute_inventory_audit_with_mapping(
         wh_only_count: grand_wh_only,
         ledger_only_count: grand_ledger_only,
         match_rate: overall_rate,
-        total_diff_amt: (grand_diff_amt * 100.0).round() / 100.0,
+        total_diff_amt: cents_to_currency(grand_diff_amt_cents),
     };
 
     let out_path_buf = if let Some(co) = custom_output {
@@ -756,7 +732,7 @@ fn generate_audit_report_excel(
         "库别",
         "核对品规总数",
         "完全吻合项",
-        "数量差异项",
+        "数量或金额差异项",
         "仅财务有结存",
         "仅库管有在库",
         "账实吻合率",

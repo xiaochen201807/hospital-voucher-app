@@ -1,11 +1,11 @@
 use crate::core::config::{clean_text, ConfigData};
 use crate::core::excel_utils::{
-    amount_or_product, collect_source_dates, find_header_row, is_summary_row, optional_col,
-    read_sheet_rows, required_col, row_as_f64, row_as_string,
+    amount_or_product, cents_to_currency, collect_source_dates, currency_cents, find_header_row,
+    is_summary_row, optional_col, read_sheet_rows, required_col, row_as_f64, row_as_string,
 };
 use crate::core::ledger::load_ledger_entries;
-use crate::core::matching::match_drug;
-use crate::core::models::UnmatchedDrug;
+use crate::core::matching::{build_ledger_candidates, resolve_drug_match};
+use crate::core::models::{ConfirmedLedgerMapping, UnmatchedDrug};
 use crate::core::voucher_writer::{
     copy_template_sheets, load_template_sheets, set_default_voucher_column_widths,
     write_voucher_headers, write_voucher_line, VoucherFormats, VoucherLine,
@@ -55,11 +55,69 @@ struct InboundItem {
     qty: f64,
     price: f64,
     amount: f64,
+    amount_cents: i64,
     #[allow(dead_code)]
     unit: String,
 }
 
+#[derive(Debug, Clone)]
+struct SupplierGroup {
+    supplier: String,
+    code: String,
+    brief: String,
+    item_indices: Vec<usize>,
+    amount_cents: i64,
+}
+
+/// 按供应商编码建立分组；未匹配到编码时才退回清洗后的供应商名称。
+///
+/// 入库单中的供应商名称可能同时出现简称、全称或系统截断值。只用原始字符串
+/// 分组会把同一供应商拆成多张汇总分录，先解析标准编码再分组才能保证“一供应商一汇总”。
+fn build_supplier_groups(
+    items: &[InboundItem],
+    supplier_dict: &HashMap<String, String>,
+) -> Vec<SupplierGroup> {
+    let mut groups = Vec::new();
+    let mut group_indices: HashMap<String, usize> = HashMap::new();
+
+    for (item_idx, item) in items.iter().enumerate() {
+        let (code, matched_supplier) = match_supplier_code(&item.supplier, supplier_dict);
+        let group_key = if !code.is_empty() {
+            format!("code:{}", code)
+        } else {
+            format!("name:{}", clean_text(&item.supplier))
+        };
+        let display_supplier = if !matched_supplier.trim().is_empty() {
+            matched_supplier
+        } else {
+            item.supplier.clone()
+        };
+
+        let group_idx = if let Some(group_idx) = group_indices.get(&group_key) {
+            *group_idx
+        } else {
+            let group_idx = groups.len();
+            groups.push(SupplierGroup {
+                supplier: display_supplier.clone(),
+                code: code.clone(),
+                brief: get_supplier_brief(&display_supplier),
+                item_indices: Vec::new(),
+                amount_cents: 0,
+            });
+            group_indices.insert(group_key, group_idx);
+            group_idx
+        };
+
+        let group = &mut groups[group_idx];
+        group.item_indices.push(item_idx);
+        group.amount_cents += item.amount_cents;
+    }
+
+    groups
+}
+
 /// 执行生成药房入库凭证
+#[allow(clippy::too_many_arguments)]
 pub fn generate_inbound_voucher(
     inbound_path: &str,
     ledger_path: &str,
@@ -68,6 +126,7 @@ pub fn generate_inbound_voucher(
     target_date_opt: Option<&str>,
     voucher_no: Option<&str>,
     config: &ConfigData,
+    confirmed_mappings: Option<&[ConfirmedLedgerMapping]>,
 ) -> Result<InboundVoucherResult, String> {
     let in_p = Path::new(inbound_path);
     let ledger_p = Path::new(ledger_path);
@@ -115,7 +174,6 @@ pub fn generate_inbound_voucher(
     let v_no_str = voucher_no.unwrap_or("").trim();
 
     let mut items = Vec::new();
-    let mut total_debit = 0.0;
     let mut total_qty = 0.0;
 
     for row in rows.iter().skip(h_idx + 1) {
@@ -134,8 +192,8 @@ pub fn generate_inbound_voucher(
         let qty = row_as_f64(row, col_qty);
         let price = row_as_f64(row, col_price);
         let amt = amount_or_product(row_as_f64(row, col_amt), qty, price);
+        let amount_cents = currency_cents(amt);
 
-        total_debit += amt;
         total_qty += qty;
 
         items.push(InboundItem {
@@ -145,7 +203,8 @@ pub fn generate_inbound_voucher(
             factory,
             qty,
             price,
-            amount: amt,
+            amount: cents_to_currency(amount_cents),
+            amount_cents,
             unit,
         });
     }
@@ -157,43 +216,28 @@ pub fn generate_inbound_voucher(
         &source_dates,
     );
 
-    // 按入库单中首次出现的顺序建立供应商分组，保证每个供应商的明细紧跟其汇总分录。
-    let mut supplier_groups: Vec<(String, Vec<usize>, f64)> = Vec::new();
-    let mut supplier_group_indices = HashMap::new();
-    for (item_idx, it) in items.iter().enumerate() {
-        let group_idx = if let Some(group_idx) = supplier_group_indices.get(&it.supplier) {
-            *group_idx
-        } else {
-            let group_idx = supplier_groups.len();
-            supplier_groups.push((it.supplier.clone(), Vec::new(), 0.0));
-            supplier_group_indices.insert(it.supplier.clone(), group_idx);
-            group_idx
-        };
-        supplier_groups[group_idx].1.push(item_idx);
-        supplier_groups[group_idx].2 += it.amount;
-    }
+    // 按供应商标准编码建立分组，保证每个供应商只有一个汇总分录，且明细连续。
+    let supplier_groups = build_supplier_groups(&items, &supplier_dict);
 
     let mut suppliers_summary = Vec::new();
-    let mut total_credit = 0.0;
+    let total_debit_cents: i64 = items.iter().map(|item| item.amount_cents).sum();
+    let total_credit_cents: i64 = supplier_groups.iter().map(|group| group.amount_cents).sum();
 
-    for (sup, item_indices, amt) in &supplier_groups {
-        let (code, _) = match_supplier_code(sup, &supplier_dict);
-        let brief = get_supplier_brief(sup);
-        let c_amt = (*amt * 100.0).round() / 100.0;
-        total_credit += c_amt;
+    for group in &supplier_groups {
+        let c_amt = cents_to_currency(group.amount_cents);
 
         suppliers_summary.push(SupplierSummary {
-            supplier: sup.clone(),
-            code,
-            brief,
-            count: item_indices.len(),
+            supplier: group.supplier.clone(),
+            code: group.code.clone(),
+            brief: group.brief.clone(),
+            count: group.item_indices.len(),
             amount: c_amt,
         });
     }
 
-    total_debit = (total_debit * 100.0).round() / 100.0;
-    total_credit = (total_credit * 100.0).round() / 100.0;
-    let is_balanced = (total_debit - total_credit).abs() < 0.01;
+    let total_debit = cents_to_currency(total_debit_cents);
+    let total_credit = cents_to_currency(total_credit_cents);
+    let is_balanced = total_debit_cents == total_credit_cents;
 
     // 4. 生成凭证 Excel
     let mut out_wb = Workbook::new();
@@ -208,10 +252,18 @@ pub fn generate_inbound_voucher(
     let mut unmatched_items = Vec::new();
 
     // 写入“供应商明细借方分录 -> 该供应商贷方汇总分录”，再处理下一个供应商。
-    for (group_idx, (_, item_indices, _)) in supplier_groups.iter().enumerate() {
-        for item_idx in item_indices {
+    for (group_idx, group) in supplier_groups.iter().enumerate() {
+        for item_idx in &group.item_indices {
             let it = &items[*item_idx];
-            let matched = match_drug(&it.name, &it.spec, &it.factory, &ledger_entries, config);
+            let matched = resolve_drug_match(
+                *item_idx,
+                &it.name,
+                &it.spec,
+                &it.factory,
+                &ledger_entries,
+                config,
+                confirmed_mappings,
+            );
             let aux_code = if let Some(m) = matched {
                 matched_count += 1;
                 m.aux_code
@@ -226,6 +278,7 @@ pub fn generate_inbound_voucher(
                     "总账中未查到对应存货编码".to_string()
                 };
                 unmatched_items.push(UnmatchedDrug {
+                    id: *item_idx,
                     name: it.name.clone(),
                     target_name: it.name.clone(),
                     spec: it.spec.clone(),
@@ -237,12 +290,12 @@ pub fn generate_inbound_voucher(
                     amount: it.amount,
                     in_amt: it.amount,
                     reason,
+                    candidates: build_ledger_candidates(&it.name, &ledger_entries),
                 });
                 String::new()
             };
-            let sup_brief = get_supplier_brief(&it.supplier);
-            let summary_text = if !sup_brief.is_empty() {
-                sup_brief
+            let summary_text = if !group.brief.is_empty() {
+                group.brief.clone()
             } else {
                 format!("入库-{}", it.name)
             };
@@ -366,6 +419,43 @@ mod tests {
     }
 
     #[test]
+    fn supplier_name_variants_are_merged_by_supplier_code() {
+        let supplier_dict =
+            HashMap::from([("004".to_string(), "河北国泰医药有限责任公司".to_string())]);
+        let items = vec![
+            InboundItem {
+                supplier: "河北国泰".to_string(),
+                name: "药品A".to_string(),
+                spec: String::new(),
+                factory: String::new(),
+                qty: 1.0,
+                price: 1.0,
+                amount: 1.0,
+                amount_cents: 100,
+                unit: "盒".to_string(),
+            },
+            InboundItem {
+                supplier: "河北国泰医药有限责任公司".to_string(),
+                name: "药品B".to_string(),
+                spec: String::new(),
+                factory: String::new(),
+                qty: 2.0,
+                price: 1.0,
+                amount: 2.0,
+                amount_cents: 200,
+                unit: "盒".to_string(),
+            },
+        ];
+
+        let groups = build_supplier_groups(&items, &supplier_dict);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].code, "004");
+        assert_eq!(groups[0].item_indices, vec![0, 1]);
+        assert_eq!(groups[0].amount_cents, 300);
+    }
+
+    #[test]
     fn real_inbound_workbook_uses_business_date_and_correct_summary() {
         let (config, _) = crate::core::config::load_config(None);
         let output = std::env::temp_dir().join(format!(
@@ -385,10 +475,20 @@ mod tests {
             None,
             Some("20"),
             &config,
+            None,
         )
         .expect("真实入库样例应能生成凭证");
 
         assert_eq!(result.voucher_date, "2026-08-31");
+        assert!(result.is_balanced);
+        assert_eq!(
+            currency_cents(result.total_debit_amt),
+            currency_cents(result.total_credit_amt)
+        );
+        assert!(result
+            .suppliers_summary
+            .iter()
+            .all(|summary| summary.amount >= 0.0));
 
         let mut workbook = open_excel(&output).expect("应能重新打开生成的入库凭证");
         let sheet_name = workbook

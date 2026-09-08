@@ -74,6 +74,26 @@ fn normalize_header(value: &str) -> String {
         .to_lowercase()
 }
 
+fn select_sheet_name(
+    sheet_names: &[String],
+    exact_hints: &[&str],
+    contains_hints: &[&str],
+    prefer_last_contains: bool,
+) -> Option<String> {
+    for hint in exact_hints {
+        if let Some(name) = sheet_names.iter().find(|name| name.as_str() == *hint) {
+            return Some(name.clone());
+        }
+    }
+
+    let contains_match = |name: &&String| contains_hints.iter().any(|hint| name.contains(hint));
+    if prefer_last_contains {
+        sheet_names.iter().rev().find(contains_match).cloned()
+    } else {
+        sheet_names.iter().find(contains_match).cloned()
+    }
+}
+
 /// 按工作表名称提示读取数据；未命中提示时使用第一个工作表。
 pub fn read_sheet_rows(
     path: &Path,
@@ -82,11 +102,31 @@ pub fn read_sheet_rows(
 ) -> Result<(String, SheetRows), String> {
     let mut workbook = open_excel(path)?;
     let sheet_names = workbook.sheet_names();
-    let sheet_name = sheet_names
-        .iter()
-        .find(|name| sheet_hints.iter().any(|hint| name.contains(hint)))
-        .cloned()
+    let sheet_name = select_sheet_name(&sheet_names, &[], sheet_hints, false)
         .or_else(|| sheet_names.first().cloned())
+        .ok_or_else(|| format!("{}中无有效工作表", context))?;
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| format!("读取{}失败: {}", context, e))?;
+    let rows = range.rows().map(|row| row.to_vec()).collect();
+    Ok((sheet_name, rows))
+}
+
+/// 读取需要优先使用汇总 Sheet 的工作簿。
+///
+/// 先按名称精确命中，再从包含提示词的 Sheet 中选择最后一个。这样第一步生成的
+/// “原始销售表 + 销售明细”双 Sheet 文件，会优先读取去重后的“销售明细”。
+pub fn read_sheet_rows_prefer(
+    path: &Path,
+    exact_sheet_hints: &[&str],
+    sheet_hints: &[&str],
+    context: &str,
+) -> Result<(String, SheetRows), String> {
+    let mut workbook = open_excel(path)?;
+    let sheet_names = workbook.sheet_names();
+    let sheet_name = select_sheet_name(&sheet_names, exact_sheet_hints, sheet_hints, true)
+        .or_else(|| sheet_names.last().cloned())
         .ok_or_else(|| format!("{}中无有效工作表", context))?;
 
     let range = workbook
@@ -111,6 +151,19 @@ pub fn find_header_row(
 
 pub fn required_col(header: &[Data], candidates: &[&str], label: &str) -> Result<usize, String> {
     find_col_idx(header, candidates).ok_or_else(|| format!("表头中缺少必需列：{}", label))
+}
+
+/// 只查找表头完全一致的列，不执行包含匹配。
+pub fn find_exact_col_idx(header: &[Data], candidates: &[&str]) -> Option<usize> {
+    let normalized_candidates: Vec<String> = candidates
+        .iter()
+        .map(|candidate| normalize_header(candidate))
+        .collect();
+
+    header.iter().enumerate().find_map(|(idx, cell)| {
+        let name = normalize_header(&cell_as_string(cell));
+        normalized_candidates.contains(&name).then_some(idx)
+    })
 }
 
 pub fn optional_col(header: &[Data], candidates: &[&str], fallback: usize) -> usize {
@@ -276,5 +329,34 @@ mod tests {
         assert!(is_summary_row("总计金额"));
         assert!(is_summary_row(""));
         assert!(!is_summary_row("阿莫西林"));
+    }
+
+    #[test]
+    fn summary_sheet_selection_prefers_exact_then_last_matching_sheet() {
+        let sheet_names = vec![
+            "原始销售表".to_string(),
+            "销售明细".to_string(),
+            "备注销售".to_string(),
+        ];
+
+        assert_eq!(
+            select_sheet_name(&sheet_names, &["销售明细"], &["销售"], true),
+            Some("销售明细".to_string())
+        );
+        assert_eq!(
+            select_sheet_name(&sheet_names, &["不存在"], &["销售"], true),
+            Some("备注销售".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_column_lookup_does_not_treat_amount_as_unit_price() {
+        let header = vec![
+            Data::String("数量".to_string()),
+            Data::String("进价金额".to_string()),
+        ];
+
+        assert_eq!(find_exact_col_idx(&header, &["进价"]), None);
+        assert_eq!(find_exact_col_idx(&header, &["进价金额"]), Some(1));
     }
 }

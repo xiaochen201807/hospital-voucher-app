@@ -66,6 +66,19 @@
             </div>
           </button>
 
+          <button class="nav-tab" data-tab="tab-inbound">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                <path d="M12 2v14M18 10l-6 6-6-6" />
+                <rect x="3" y="16" width="18" height="6" rx="2" />
+              </svg>
+            </div>
+            <div class="nav-label">
+              <div class="nav-name">药房入库凭证</div>
+              <div class="nav-desc">西药/中药借贷双向审计</div>
+            </div>
+          </button>
+
           <button class="nav-tab" data-tab="tab-outbound">
             <div class="nav-icon">
               <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
@@ -78,20 +91,7 @@
             </div>
             <div class="nav-label">
               <div class="nav-name">销售出库凭证</div>
-              <div class="nav-desc">自动关联总账存货编码</div>
-            </div>
-          </button>
-
-          <button class="nav-tab" data-tab="tab-inbound">
-            <div class="nav-icon">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
-                <path d="M12 2v14M18 10l-6 6-6-6" />
-                <rect x="3" y="16" width="18" height="6" rx="2" />
-              </svg>
-            </div>
-            <div class="nav-label">
-              <div class="nav-name">药房入库凭证</div>
-              <div class="nav-desc">西药/中药借贷双向审计</div>
+              <div class="nav-desc">使用入库后重新导出的总账并自动关联存货编码</div>
             </div>
           </button>
 
@@ -218,12 +218,12 @@
             </div>
           </section>
 
-          <!-- TAB 2: 销售出库凭证生成 -->
+          <!-- TAB 3: 销售出库凭证生成 -->
           <section id="tab-outbound" class="tab-panel">
             <div class="panel-header">
               <div class="panel-title-group">
                 <h2 class="panel-title">销售出库凭证生成</h2>
-                <p class="panel-desc">读取销售汇总数据，精准匹配数量金额总账中存货科目的厂家、规格与单价；期末数量为 0 的科目，将历史尾差摊到该科目的最后一笔出库商品，并自动填入借方平衡金额。</p>
+                <p class="panel-desc">读取第一步生成的销售汇总表，并使用“入库凭证已导入后”重新导出的数量金额总账作为出库前库存快照；仅当本次出库后数量恰好变为 0 时，将总账账面金额与出库基础金额的差额摊到该科目的最后一笔出库商品，并自动填入借方平衡金额。</p>
               </div>
             </div>
 
@@ -242,7 +242,8 @@
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>2. 数量金额总账表 (Excel)</span>
+                    <span>2. 入库凭证导入后重新导出的数量金额总账表 (Excel)</span>
+                    <span class="label-tip">出库前库存快照；多个总账文件时请手工选择</span>
                     <span class="badge">必需</span>
                   </label>
                   <div class="file-input-wrapper">
@@ -321,15 +322,19 @@
                   <div class="stat-label">贷方出库总额 (元)</div>
                 </div>
               </div>
+              <p id="outbound-depletion-summary" class="panel-desc result-note"></p>
 
               <!-- 未匹配新药表格 -->
               <div id="outbound-unmatched-box" class="unmatched-box hidden">
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">安全告警</span>
-                    <span>发现 <strong id="outbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户，请核实）：</span>
+                    <span>发现 <strong id="outbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户；可在下方选择候选科目后重新生成）：</span>
                   </div>
                   <div class="unmatched-actions">
+                    <button id="btn-rerun-outbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方人工选择的财务存货科目重新生成凭证">
+                      ✓ 按手工匹配重新生成
+                    </button>
                     <button id="btn-copy-outbound-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
                       📋 复制清单
                     </button>
@@ -348,7 +353,7 @@
                         <th>出库数量</th>
                         <th>进价</th>
                         <th>未匹配原因诊断</th>
-                        <th style="text-align: center;">操作</th>
+                        <th style="text-align: center;">手工指定科目</th>
                       </tr>
                     </thead>
                     <tbody></tbody>
@@ -358,12 +363,12 @@
             </div>
           </section>
 
-          <!-- TAB 3: 药房入库凭证生成 -->
+          <!-- TAB 2: 药房入库凭证生成 -->
           <section id="tab-inbound" class="tab-panel">
             <div class="panel-header">
               <div class="panel-title-group">
                 <h2 class="panel-title">药房入库凭证生成</h2>
-                <p class="panel-desc">支持西药与中药饮片入库单，精准匹配供应商往来科目，智能校验借贷总额平衡性（借方库存商品 = 贷方应付账款）。</p>
+                <p class="panel-desc">使用入库前总账和库管入库单生成凭证；支持西药与中药饮片，按供应商连续输出“明细借方 + 一个供应商汇总贷方”，并校验借贷总额平衡性。</p>
               </div>
             </div>
 
@@ -382,7 +387,8 @@
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>2. 数量金额总账表 (Excel)</span>
+                    <span>2. 入库前数量金额总账表 (Excel)</span>
+                    <span class="label-tip">用于生成入库凭证；多个总账文件时请手工选择</span>
                     <span class="badge">必需</span>
                   </label>
                   <div class="file-input-wrapper">
@@ -508,9 +514,12 @@
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">安全告警</span>
-                    <span>发现 <strong id="inbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户，请核实）：</span>
+                    <span>发现 <strong id="inbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户；可在下方选择候选科目后重新生成）：</span>
                   </div>
                   <div class="unmatched-actions">
+                    <button id="btn-rerun-inbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方人工选择的财务存货科目重新生成凭证">
+                      ✓ 按手工匹配重新生成
+                    </button>
                     <button id="btn-copy-inbound-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
                       📋 复制清单
                     </button>
@@ -530,7 +539,7 @@
                         <th>进价</th>
                         <th>入库金额</th>
                         <th>未匹配原因诊断</th>
-                        <th style="text-align: center;">操作</th>
+                        <th style="text-align: center;">手工指定科目</th>
                       </tr>
                     </thead>
                     <tbody></tbody>
@@ -733,11 +742,11 @@
                 </div>
                 <div class="stat-card success-card">
                   <div class="stat-val" id="stat-compare-equal" style="color: var(--color-success, #10b981);">0</div>
-                  <div class="stat-label">数量完全吻合</div>
+                  <div class="stat-label">数量和金额均吻合</div>
                 </div>
                 <div class="stat-card danger-card">
                   <div class="stat-val" id="stat-compare-diff" style="color: var(--color-danger, #ef4444);">0</div>
-                  <div class="stat-label">存在数量差异</div>
+                  <div class="stat-label">存在数量或金额差异</div>
                 </div>
                 <div class="stat-card warning-card">
                   <div class="stat-val" id="stat-compare-ledger-only" style="color: var(--color-warning, #f59e0b);">0</div>
@@ -916,20 +925,22 @@
 
             <div class="help-section">
               <h3 class="help-section-title">
-                <span class="step-num">2</span>
+                <span class="step-num">3</span>
                 <span>出库凭证存货科目匹配与优先级法则 (generate_voucher)</span>
               </h3>
-              <p class="help-text">系统在读取医院【数量金额总账】时，按照严格的防错优先级依次寻址：</p>
+              <p class="help-text">第三步使用入库凭证导入后重新导出的总账作为出库前快照。系统在读取医院【数量金额总账】时，按照严格的防错优先级依次寻址：</p>
               <ul class="help-list">
                 <li><span class="tag-rule">优先级 1 (最优)</span> <strong>全名 + 厂家全词精准匹配</strong>：当药品带有厂家（例如 <code>鸡血藤（蕴德）</code>），优先匹配总账中带有相同厂家括号简称的存货科目（精准命中 <code>1201_ZY0124</code>，绝不误配国瑞堂）。</li>
                 <li><span class="tag-rule">优先级 2</span> <strong>全名 + 规格一致性匹配</strong>：当无厂家冲突时，匹配药品全名并校验规格一致性。</li>
                 <li><span class="tag-rule">单价取值</span>：优先取总账中该存货科目的最新【结存单价 / 实际成本单价】；若勾选“回退历史进价”，总账无单价时会自动取销售表进价，确保贷方金额不为零。</li>
+                <li><span class="tag-rule">数量校验</span>：本次出库累计数量超过所选总账期末结存时，系统会停止生成，要求重新选择第二次总账或检查销售表是否重复。</li>
+                <li><span class="tag-rule">尾差处理</span>：只有本次出库量等于总账快照期末数量时，才把总账金额与基础出库金额的差额摊到该存货最后一笔出库；历史数量为 0 但金额非 0 的记录不参与尾差。</li>
               </ul>
             </div>
 
             <div class="help-section">
               <h3 class="help-section-title">
-                <span class="step-num">3</span>
+                <span class="step-num">规则</span>
                 <span>中药饮片厂家感知与【海螵蛸】防串户机制 (重点保障)</span>
               </h3>
               <div class="alert-box">
@@ -943,19 +954,19 @@
 
             <div class="help-section">
               <h3 class="help-section-title">
-                <span class="step-num">4</span>
+                <span class="step-num">2</span>
                 <span>药房入库凭证借贷平衡双向审计机制 (generate_inbound_voucher)</span>
               </h3>
               <ul class="help-list">
                 <li><strong>借方分录（入库药品）</strong>：借记【库存商品】（西药）或【中药饮片】（中药），按单据中的各药品品规分别生成明细行，辅助核算挂对应存货编码。</li>
-                <li><strong>贷方分录（应付供应商）</strong>：贷记【应付账款】，按单据中涉及的各供应商自动归集合计，从 22 家供应商往来字典中自动匹配辅助核算编码（如华润益生 <code>002</code>、河北国泰 <code>004</code>、河北蕴德 <code>005</code>），并生成规范摘要（如 <code>河北蕴德到货</code>）。</li>
-                <li><strong>双向天平审计</strong>：界面仪表盘自动核算 <code>∑借方各药品金额</code> 与 <code>∑贷方各供应商应付款</code>，差额为 0.00 时指示灯亮起绿色“借贷完美平衡”。</li>
+                <li><strong>贷方分录（应付供应商）</strong>：贷记【应付账款】，同一供应商无论简称、全称还是截断名称都按标准编码合并为一个汇总分录，并生成规范摘要（如 <code>河北蕴德到货</code>）。</li>
+                <li><strong>双向天平审计</strong>：界面仪表盘按人民币分核算 <code>∑借方各药品金额</code> 与 <code>∑贷方各供应商应付款</code>，差额为 0.00 时指示灯亮起绿色“借贷完美平衡”。</li>
               </ul>
             </div>
 
             <div class="help-section">
               <h3 class="help-section-title">
-                <span class="step-num">5</span>
+                <span class="step-num">4</span>
                 <span>未匹配新药品出现时，财务操作指南</span>
               </h3>
               <ol class="help-list numbered">
@@ -964,7 +975,7 @@
                 <li><strong>补填存货编码</strong>：
                   <ul>
                     <li>方式 A：在生成的 Excel 凭证导入表中，直接在该行“存货代码”列补填刚建好的编码即可导入。</li>
-                    <li>方式 B：切换至软件第 4 个 Tab【厂家与字典配置】，在“特殊药品编码指定覆盖”中添加该药品（如 <code>海螵蛸（蕴德）: 1201_ZY0259</code>）并保存，以后再次运行将全自动匹配！</li>
+                    <li>方式 B：切换至软件第 5 个 Tab【厂家与字典配置】，在“特殊药品编码指定覆盖”中添加该药品（如 <code>海螵蛸（蕴德）: 1201_ZY0259</code>）并保存，以后再次运行将全自动匹配！</li>
                   </ul>
                 </li>
               </ol>
@@ -972,15 +983,15 @@
 
             <div class="help-section">
               <h3 class="help-section-title">
-                <span class="step-num">6</span>
+                <span class="step-num">5</span>
                 <span>入库出库后账实库存多库比对与四维差异排查 (compare_inventory)</span>
               </h3>
               <p class="help-text">
                 当当期出库凭证与入库凭证全部记账完成后，财务【数量金额总账】的期末结存数量应当与药房库管系统现存实盘数量一致。系统支持西药（1201_XY）、中药（1201_ZY）、耗材（1201_HC）三库多维度自动对账：
               </p>
               <ul class="help-list">
-                <li><span class="badge badge-success">数量完全吻合</span> 财务期末结存数量 == 库管在库数量，差额为 0.00。</li>
-                <li><span class="badge badge-danger">存在数量差异</span> 财务与库管均有记录，但数量不符（如出入库单据跨月记账、漏记损耗盘亏等，报告将高亮显示差异数量与涉及金额）。</li>
+                <li><span class="badge badge-success">数量和金额均吻合</span> 财务期末结存数量与金额均和库管在库数据一致。</li>
+                <li><span class="badge badge-danger">存在数量或金额差异</span> 财务与库管的数量或金额不符（如出入库单据跨月记账、漏记损耗盘亏、历史尾差未处理等，报告将高亮显示差异数量与涉及金额）。</li>
                 <li><span class="badge badge-warning">仅财务有结存</span> 财务总账尚有结存余额，但库管系统在库数量已为 0（多见于已清库但财务尾数未调账）。</li>
                 <li><span class="badge badge-info">仅库管有在库</span> 库管在库有数量，但财务总账查无对应编码（多见于新药未同步建账或编码映射不一致）。</li>
                 <li><strong>审计报告产出</strong>：自动导出《账实库存核对分析报告.xlsx》，内置【各库汇总看板】、【差异重点排查清单】、【全部品规对照底稿】3个Sheet，可直接供两部门核对签章。</li>

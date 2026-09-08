@@ -259,6 +259,13 @@ pub fn process_sales_file(
         .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
         .set_border(FormatBorder::Thin);
 
+    let fmt_cell_price = Format::new()
+        .set_font_size(10)
+        .set_num_format("0.0000")
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin);
+
     let fmt_cell_qty = Format::new()
         .set_font_size(10)
         .set_num_format("#,##0")
@@ -266,7 +273,7 @@ pub fn process_sales_file(
         .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
         .set_border(FormatBorder::Thin);
 
-    // 1. 标题行 (Row 0: 合并 0..8 列)
+    // 1. 标题行 (Row 0: 合并 0..9 列)
     let title_text = if sheet0_name.contains("销售表") {
         sheet0_name.replace("销售表", "销售明细表")
     } else {
@@ -277,7 +284,7 @@ pub fn process_sales_file(
         .set_row_height(0, 32)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .merge_range(0, 0, 0, 8, &title_text, &fmt_title)
+        .merge_range(0, 0, 0, 9, &title_text, &fmt_title)
         .map_err(|e| e.to_string())?;
 
     // 2. 表头行 (Row 1)
@@ -288,6 +295,7 @@ pub fn process_sales_file(
         "制药厂",
         "单位",
         "数量",
+        "进价",
         "进价金额",
         "零价金额",
         "库存",
@@ -334,13 +342,25 @@ pub fn process_sales_file(
             .write_number_with_format(current_row, 5, item.qty, &fmt_cell_qty)
             .map_err(|e| e.to_string())?;
         ws_summary
-            .write_number_with_format(current_row, 6, item.cost_amt, &fmt_cell_money)
+            .write_number_with_format(
+                current_row,
+                6,
+                if item.qty.abs() > 1e-9 {
+                    item.cost_amt / item.qty
+                } else {
+                    0.0
+                },
+                &fmt_cell_price,
+            )
             .map_err(|e| e.to_string())?;
         ws_summary
-            .write_number_with_format(current_row, 7, item.retail_amt, &fmt_cell_money)
+            .write_number_with_format(current_row, 7, item.cost_amt, &fmt_cell_money)
             .map_err(|e| e.to_string())?;
         ws_summary
-            .write_number_with_format(current_row, 8, item.stock, &fmt_cell_qty)
+            .write_number_with_format(current_row, 8, item.retail_amt, &fmt_cell_money)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_number_with_format(current_row, 9, item.stock, &fmt_cell_qty)
             .map_err(|e| e.to_string())?;
 
         current_row += 1;
@@ -374,13 +394,16 @@ pub fn process_sales_file(
         .write_number_with_format(current_row, 5, totals.total_qty, &fmt_cell_qty)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .write_number_with_format(current_row, 6, totals.total_in_amt, &fmt_cell_money)
+        .write_blank(current_row, 6, &fmt_cell_price)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .write_number_with_format(current_row, 7, totals.total_retail_amt, &fmt_cell_money)
+        .write_number_with_format(current_row, 7, totals.total_in_amt, &fmt_cell_money)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .write_blank(current_row, 8, &fmt_cell_center)
+        .write_number_with_format(current_row, 8, totals.total_retail_amt, &fmt_cell_money)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_blank(current_row, 9, &fmt_cell_center)
         .map_err(|e| e.to_string())?;
 
     // 列宽设置
@@ -403,13 +426,16 @@ pub fn process_sales_file(
         .set_column_width(5, 12)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .set_column_width(6, 16)
+        .set_column_width(6, 12)
         .map_err(|e| e.to_string())?;
     ws_summary
         .set_column_width(7, 16)
         .map_err(|e| e.to_string())?;
     ws_summary
-        .set_column_width(8, 12)
+        .set_column_width(8, 16)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(9, 12)
         .map_err(|e| e.to_string())?;
 
     // 保存文件
