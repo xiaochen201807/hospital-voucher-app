@@ -45,7 +45,21 @@ const state = {
   previewUnmatchedOnly: false,
   previewSearch: '',
   outboundManualMappings: {},
-  inboundManualMappings: {}
+  inboundManualMappings: {},
+  manualSearch: {
+    outbound: {
+      ledgerPath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
+      selectedLabels: {}, selectedCandidates: {}
+    },
+    inbound: {
+      ledgerPath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
+      selectedLabels: {}, selectedCandidates: {}
+    },
+    audit: {
+      ledgerPath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
+      selectedLabels: {}, selectedCandidates: {}
+    }
+  }
 };
 
 // HTML 转义防注入
@@ -223,6 +237,291 @@ async function invokeWithLoading(command, args, options = {}) {
     showToast(`执行异常: ${err}`, 'error');
     return null;
   }
+}
+
+function resetManualSearchContext(kind, ledgerPath = '') {
+  if (scheduleManualCandidateSearch.timers) {
+    for (const key of scheduleManualCandidateSearch.timers.keys()) {
+      if (key.startsWith(`${kind}:`)) {
+        clearTimeout(scheduleManualCandidateSearch.timers.get(key));
+        scheduleManualCandidateSearch.timers.delete(key);
+      }
+    }
+  }
+  state.manualSearch[kind] = {
+    ledgerPath,
+    queries: {},
+    results: {},
+    defaults: {},
+    requestIds: {},
+    selectedLabels: {},
+    selectedCandidates: {}
+  };
+}
+
+function candidateLabel(candidate) {
+  const name = candidate.name || '未命名科目';
+  const spec = candidate.spec ? ` ${candidate.spec}` : '';
+  const qty = candidate.qty ?? 0;
+  return `${name}${spec} (${candidate.code || '-'}) [期末:${qty}]`;
+}
+
+function getManualCandidates(kind, itemId) {
+  const context = state.manualSearch[kind];
+  if (!context) return [];
+  return Object.prototype.hasOwnProperty.call(context.results, itemId)
+    ? context.results[itemId]
+    : context.defaults[itemId] || [];
+}
+
+function renderCandidateOptions(picker, candidates, selectedCode = '', options = {}) {
+  if (!picker) return;
+  const list = picker.querySelector('.candidate-options');
+  if (!list) return;
+
+  const {
+    includeNone = false,
+    emptyLabel = '-- 选择财务存货科目 --',
+    noneLabel = '【置空/不关联】',
+    selectedCandidate = null
+  } = options;
+  const visibleCandidates = Array.isArray(candidates) ? [...candidates] : [];
+  const selected = selectedCode || '';
+  if (
+    selected &&
+    selected !== '__NONE__' &&
+    selectedCandidate?.code === selected &&
+    !visibleCandidates.some(candidate => candidate.code === selected)
+  ) {
+    visibleCandidates.unshift(selectedCandidate);
+  }
+
+  list.innerHTML = '';
+  if (visibleCandidates.length === 0) {
+    const emptyOption = document.createElement('div');
+    emptyOption.className = 'candidate-option-empty';
+    emptyOption.textContent = emptyLabel;
+    list.appendChild(emptyOption);
+  }
+
+  visibleCandidates.forEach(candidate => {
+    const code = candidate.code || '';
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = `candidate-option${code === selected ? ' is-selected' : ''}`;
+    option.dataset.code = code;
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(code === selected));
+    option.textContent = candidateLabel(candidate);
+    list.appendChild(option);
+  });
+  if (includeNone) {
+    const noneOption = document.createElement('button');
+    noneOption.type = 'button';
+    noneOption.className = `candidate-option candidate-option-none${selected === '__NONE__' ? ' is-selected' : ''}`;
+    noneOption.dataset.code = '__NONE__';
+    noneOption.setAttribute('role', 'option');
+    noneOption.setAttribute('aria-selected', String(selected === '__NONE__'));
+    noneOption.textContent = noneLabel;
+    list.appendChild(noneOption);
+  }
+  picker.dataset.selectedCode = selected === '__NONE__' ? '' : selected;
+}
+
+function openCandidateOptions(picker) {
+  const list = picker?.querySelector('.candidate-options');
+  const input = picker?.querySelector('.candidate-search-input');
+  if (!list) return;
+  list.classList.remove('hidden');
+  input?.setAttribute('aria-expanded', 'true');
+}
+
+function closeCandidateOptions(picker) {
+  const list = picker?.querySelector('.candidate-options');
+  const input = picker?.querySelector('.candidate-search-input');
+  if (!list) return;
+  list.classList.add('hidden');
+  input?.setAttribute('aria-expanded', 'false');
+}
+
+function findManualCandidate(kind, itemId, code) {
+  return [
+    ...getManualCandidates(kind, itemId),
+    ...(state.manualSearch[kind]?.defaults[itemId] || []),
+    state.manualSearch[kind]?.selectedCandidates[itemId]
+  ].find(candidate => candidate?.code === code) || null;
+}
+
+function scheduleManualCandidateSearch(input, picker, kind, selectedCode = '', category = '') {
+  const itemId = String(input.dataset.id);
+  const context = state.manualSearch[kind];
+  if (!context) return;
+  const query = input.value.trim();
+  context.queries[itemId] = query;
+  context.requestIds[itemId] = (context.requestIds[itemId] || 0) + 1;
+  const requestId = context.requestIds[itemId];
+  const timerKey = `${kind}:${itemId}`;
+
+  if (!scheduleManualCandidateSearch.timers) {
+    scheduleManualCandidateSearch.timers = new Map();
+  }
+  if (scheduleManualCandidateSearch.timers?.has(timerKey)) {
+    clearTimeout(scheduleManualCandidateSearch.timers.get(timerKey));
+  }
+
+  const selected = selectedCode || picker?.dataset.selectedCode || '';
+  const pickerOptions = {
+    includeNone: kind === 'audit',
+    emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+    selectedCandidate: context.selectedCandidates[itemId]
+  };
+  if (!query) {
+    delete context.results[itemId];
+    input.title = '输入品名、规格或科目编码进行模糊搜索';
+    input.removeAttribute('aria-busy');
+    renderCandidateOptions(picker, context.defaults[itemId] || [], selected, pickerOptions);
+    openCandidateOptions(picker);
+    return;
+  }
+  if (!context.ledgerPath) {
+    renderCandidateOptions(picker, [], selected, {
+      ...pickerOptions,
+      emptyLabel: '尚未加载总账，无法搜索'
+    });
+    openCandidateOptions(picker);
+    return;
+  }
+
+  input.title = '正在搜索总账科目…';
+  input.setAttribute('aria-busy', 'true');
+  renderCandidateOptions(picker, [], selected, {
+    ...pickerOptions,
+    emptyLabel: '正在搜索科目…'
+  });
+  openCandidateOptions(picker);
+
+  const timer = setTimeout(async () => {
+    try {
+      const result = await invoke('search_ledger_candidates', {
+        ledger: context.ledgerPath,
+        query,
+        limit: 80,
+        category: category || null
+      });
+      if (
+        state.manualSearch[kind] !== context ||
+        context.requestIds[itemId] !== requestId ||
+        context.queries[itemId] !== query
+      ) {
+        return;
+      }
+      if (!result?.success) {
+        showToast(`科目搜索失败: ${result?.error || '未知错误'}`, 'error', 5000);
+        return;
+      }
+
+      const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+      context.results[itemId] = candidates;
+      const currentSelected = picker?.dataset.selectedCode || selected;
+      input.removeAttribute('aria-busy');
+      renderCandidateOptions(picker, candidates, currentSelected, {
+        ...pickerOptions,
+        selectedCandidate: context.selectedCandidates[itemId]
+      });
+      const emptyText = candidates.length === 0 ? '未找到匹配科目' : `找到 ${candidates.length} 个候选科目`;
+      input.title = `${emptyText}，可继续输入缩小范围`;
+      if (document.activeElement === input) {
+        openCandidateOptions(picker);
+      }
+    } catch (error) {
+      if (state.manualSearch[kind] === context && context.requestIds[itemId] === requestId) {
+        input.removeAttribute('aria-busy');
+        showToast(`科目搜索失败: ${error}`, 'error', 5000);
+      }
+    }
+  }, 250);
+  scheduleManualCandidateSearch.timers.set(timerKey, timer);
+}
+
+function bindManualCandidatePickers(table, kind, getSelectedCode, getCategory, onSelect) {
+  table?.querySelectorAll('.manual-candidate-picker').forEach(picker => {
+    const input = picker.querySelector('.candidate-search-input');
+    const list = picker.querySelector('.candidate-options');
+    if (!input || !list) return;
+
+    const itemId = String(picker.dataset.id);
+    const context = state.manualSearch[kind];
+    picker.dataset.selectedCode = getSelectedCode(itemId) || '';
+
+    input.onfocus = () => {
+      input.select();
+      const selected = getSelectedCode(itemId) || picker.dataset.selectedCode || '';
+      renderCandidateOptions(picker, getManualCandidates(kind, itemId), selected, {
+        includeNone: kind === 'audit',
+        emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+        selectedCandidate: context.selectedCandidates[itemId]
+      });
+      openCandidateOptions(picker);
+    };
+
+    input.oninput = () => {
+      scheduleManualCandidateSearch(
+        input,
+        picker,
+        kind,
+        getSelectedCode(itemId) || picker.dataset.selectedCode || '',
+        getCategory(itemId) || ''
+      );
+    };
+
+    input.onkeydown = (event) => {
+      if (event.key === 'Escape') {
+        closeCandidateOptions(picker);
+        input.blur();
+      }
+    };
+
+    input.onblur = () => {
+      setTimeout(() => {
+        if (!picker.contains(document.activeElement)) {
+          closeCandidateOptions(picker);
+        }
+      }, 120);
+    };
+
+    list.onmousedown = (event) => {
+      const option = event.target.closest('.candidate-option');
+      if (!option) return;
+      event.preventDefault();
+
+      const code = option.dataset.code || '';
+      const candidate = code === '__NONE__' ? null : findManualCandidate(kind, itemId, code);
+      const normalizedCode = code === '__NONE__' ? '' : code;
+      context.queries[itemId] = '';
+      delete context.results[itemId];
+      if (normalizedCode) {
+        context.selectedLabels[itemId] = candidate ? candidateLabel(candidate) : normalizedCode;
+        if (candidate) context.selectedCandidates[itemId] = candidate;
+      } else {
+        delete context.selectedLabels[itemId];
+        delete context.selectedCandidates[itemId];
+      }
+      picker.dataset.selectedCode = normalizedCode;
+
+      onSelect(itemId, normalizedCode, candidate);
+      if (picker.isConnected) {
+        input.value = normalizedCode
+          ? (candidate ? candidateLabel(candidate) : context.selectedLabels[itemId] || normalizedCode)
+          : '';
+        renderCandidateOptions(picker, context.defaults[itemId] || [], normalizedCode, {
+          includeNone: kind === 'audit',
+          emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+          selectedCandidate: context.selectedCandidates[itemId]
+        });
+        closeCandidateOptions(picker);
+      }
+    };
+  });
 }
 
 // 打开系统文件与所在文件夹
@@ -516,6 +815,8 @@ function initTabOutbound() {
     if (!ledger) return showToast('请指定数量金额总账表', 'warning');
     if (!template) return showToast('请指定凭证导入模板', 'warning');
 
+    resetManualSearchContext('outbound', ledger);
+
     const dateVal = inDate.value.trim() || null;
     const fallback = chkFallback.checked;
 
@@ -656,27 +957,41 @@ function jumpToConfigWithDrug(drugName) {
 }
 
 // 凭证未匹配项的人工科目选择：与账实核对预览使用同一份候选数据结构。
-function renderVoucherCandidateSelect(item, mappings) {
-  const candidates = Array.isArray(item.candidates) ? item.candidates : [];
-  if (candidates.length === 0) {
-    return '<span style="color: var(--text-muted); font-size: 11px;">暂无候选科目</span>';
+function renderVoucherCandidateSelect(item, mappings, kind) {
+  const itemId = String(item.id);
+  const context = state.manualSearch[kind];
+  const defaultCandidates = Array.isArray(item.candidates) ? item.candidates : [];
+  if (!Object.prototype.hasOwnProperty.call(context.defaults, itemId)) {
+    context.defaults[itemId] = defaultCandidates;
   }
 
-  const itemId = String(item.id);
   const selectedCode = mappings[itemId] || '';
-  let html = `<select class="candidate-select voucher-candidate-select" data-id="${escapeHtml(item.id)}" title="从总账候选中人工指定存货科目">`;
-  html += '<option value="">-- 选择财务存货科目 --</option>';
-  candidates.forEach(candidate => {
-    const code = candidate.code || '';
-    const name = candidate.name || '未命名科目';
-    const spec = candidate.spec ? ` ${candidate.spec}` : '';
-    const qty = candidate.qty ?? 0;
-    const selected = code === selectedCode ? ' selected' : '';
-    const label = `${name}${spec} (${code}) [期末:${qty}]`;
-    html += `<option value="${escapeHtml(code)}"${selected}>${escapeHtml(label)}</option>`;
-  });
-  html += '</select>';
-  return html;
+  const selectedCandidate = context.selectedCandidates[itemId]
+    || defaultCandidates.find(candidate => candidate.code === selectedCode);
+  const selectedLabel = context.selectedLabels[itemId]
+    || (selectedCandidate ? candidateLabel(selectedCandidate) : selectedCode);
+  const searchValue = context.queries[itemId] || '';
+  const inputValue = searchValue || (selectedCode ? selectedLabel : '');
+  const optionsId = `${kind}-candidate-options-${itemId}`;
+
+  return `
+    <div class="manual-candidate-picker" data-id="${escapeHtml(item.id)}">
+      <input
+        class="candidate-search-input"
+        data-id="${escapeHtml(item.id)}"
+        type="search"
+        value="${escapeHtml(inputValue)}"
+        placeholder="模糊搜索品名/规格/编码"
+        title="输入品名、规格或科目编码进行模糊搜索"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls="${escapeHtml(optionsId)}"
+        aria-expanded="false"
+        autocomplete="off"
+      />
+      <div class="candidate-options hidden" id="${escapeHtml(optionsId)}" role="listbox"></div>
+    </div>
+  `;
 }
 
 function collectConfirmedLedgerMappings(mappings) {
@@ -695,22 +1010,24 @@ function updateVoucherManualButton(buttonId, mappings, visible) {
   button.disabled = collectConfirmedLedgerMappings(mappings).length === 0;
 }
 
-function bindVoucherManualSelectors(tableId, stateKey, buttonId) {
+function bindVoucherManualSelectors(tableId, stateKey, buttonId, kind) {
   const table = document.getElementById(tableId);
   if (!table) return;
 
-  table.querySelectorAll('.voucher-candidate-select').forEach(select => {
-    select.onchange = () => {
-      const itemId = String(parseInt(select.dataset.id, 10));
-      const selectedCode = select.value.trim();
+  bindManualCandidatePickers(
+    table,
+    kind,
+    itemId => state[stateKey][itemId] || '',
+    () => '',
+    (itemId, selectedCode) => {
       if (selectedCode) {
         state[stateKey][itemId] = selectedCode;
       } else {
         delete state[stateKey][itemId];
       }
       updateVoucherManualButton(buttonId, state[stateKey], true);
-    };
-  });
+    }
+  );
 }
 
 function renderOutboundResult(data) {
@@ -754,7 +1071,7 @@ function renderOutboundResult(data) {
         <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
         <td>
           <div class="manual-match-cell">
-            ${renderVoucherCandidateSelect(item, state.outboundManualMappings)}
+            ${renderVoucherCandidateSelect(item, state.outboundManualMappings, 'outbound')}
             <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
               去配置中心
             </button>
@@ -768,7 +1085,8 @@ function renderOutboundResult(data) {
     bindVoucherManualSelectors(
       'outbound-unmatched-table',
       'outboundManualMappings',
-      'btn-rerun-outbound-manual'
+      'btn-rerun-outbound-manual',
+      'outbound'
     );
     updateVoucherManualButton(
       'btn-rerun-outbound-manual',
@@ -780,6 +1098,7 @@ function renderOutboundResult(data) {
     document.getElementById('btn-copy-outbound-unmatched').onclick = () => copyUnmatchedToClipboard(unmatched);
     document.getElementById('btn-export-outbound-unmatched').onclick = () => exportUnmatchedToCsv(unmatched, '销售出库未建档药品清单.csv');
   } else {
+    closeManualWorkspace(unmatchedBox);
     unmatchedBox.classList.add('hidden');
     updateVoucherManualButton('btn-rerun-outbound-manual', state.outboundManualMappings, false);
   }
@@ -813,6 +1132,8 @@ function initTabInbound() {
     if (!inbound) return showToast('请指定药品入库单', 'warning');
     if (!ledger) return showToast('请指定数量金额总账表', 'warning');
     if (!template) return showToast('请指定凭证导入模板', 'warning');
+
+    resetManualSearchContext('inbound', ledger);
 
     const voucherNo = inVoucherNo.value.trim() || null;
     const dateVal = inDate.value.trim() || null;
@@ -936,7 +1257,7 @@ function renderInboundResult(data) {
         <td><span class="diag-tag ${escapeHtml(diag.type)}">${escapeHtml(diag.text)}</span></td>
         <td>
           <div class="manual-match-cell">
-            ${renderVoucherCandidateSelect(item, state.inboundManualMappings)}
+            ${renderVoucherCandidateSelect(item, state.inboundManualMappings, 'inbound')}
             <button class="btn btn-outline btn-xs btn-jump-config" title="在字典配置中心为该药品设置编码">
               去配置中心
             </button>
@@ -950,7 +1271,8 @@ function renderInboundResult(data) {
     bindVoucherManualSelectors(
       'inbound-unmatched-table',
       'inboundManualMappings',
-      'btn-rerun-inbound-manual'
+      'btn-rerun-inbound-manual',
+      'inbound'
     );
     updateVoucherManualButton(
       'btn-rerun-inbound-manual',
@@ -962,6 +1284,7 @@ function renderInboundResult(data) {
     document.getElementById('btn-copy-inbound-unmatched').onclick = () => copyUnmatchedToClipboard(unmatched);
     document.getElementById('btn-export-inbound-unmatched').onclick = () => exportUnmatchedToCsv(unmatched, '药品入库未建档药品清单.csv');
   } else {
+    closeManualWorkspace(unmatchedBox);
     unmatchedBox.classList.add('hidden');
     updateVoucherManualButton('btn-rerun-inbound-manual', state.inboundManualMappings, false);
   }
@@ -1205,6 +1528,8 @@ function initTabCompare() {
         return;
       }
 
+      resetManualSearchContext('audit', ledger);
+
       const res = await invokeWithLoading('preview_inventory_audit_mapping', {
         ledger,
         west: west || null,
@@ -1344,7 +1669,7 @@ function initTabCompare() {
     });
   }
 
-  // 预览表格内的交互事件委托（勾选框与候选下拉框）
+  // 预览表格内的交互事件委托（勾选框；手工科目组合框由渲染函数绑定）
   const previewTable = document.getElementById('compare-preview-table');
   if (previewTable) {
     previewTable.addEventListener('change', (e) => {
@@ -1354,34 +1679,6 @@ function initTabCompare() {
         const item = state.auditPreview?.items?.find(it => it.id === id);
         if (item) {
           item.checked = target.checked;
-          updatePreviewStats();
-        }
-      } else if (target.classList.contains('candidate-select')) {
-        const id = parseInt(target.dataset.id, 10);
-        const item = state.auditPreview?.items?.find(it => it.id === id);
-        if (item) {
-          const val = target.value;
-          if (val === '__NONE__' || !val) {
-            item.ledger_code = '';
-            item.ledger_name = '';
-            item.ledger_qty = 0;
-            item.ledger_amount = 0;
-            item.matched = false;
-            item.checked = false;
-            item.match_method = '未自动匹配';
-          } else {
-            const cand = item.candidates?.find(c => c.code === val);
-            if (cand) {
-              item.ledger_code = cand.code;
-              item.ledger_name = cand.name;
-              item.ledger_qty = cand.qty;
-              item.ledger_amount = cand.amount;
-              item.matched = true;
-              item.checked = true;
-              item.match_method = '人工指定';
-            }
-          }
-          renderComparePreviewTable();
           updatePreviewStats();
         }
       }
@@ -1527,6 +1824,73 @@ function getMethodBadgeHtml(method) {
   return `<span class="badge-method method-none">${escapeHtml(method)}</span>`;
 }
 
+function renderAuditCandidatePicker(item) {
+  const context = state.manualSearch.audit;
+  const itemId = String(item.id);
+  const defaultCandidates = Array.isArray(item.candidates) ? item.candidates : [];
+  if (!Object.prototype.hasOwnProperty.call(context.defaults, itemId)) {
+    context.defaults[itemId] = defaultCandidates;
+  }
+
+  const selectedCode = item.ledger_code || '';
+  const selectedCandidate = context.selectedCandidates[itemId]
+    || defaultCandidates.find(candidate => candidate.code === selectedCode);
+  if (selectedCode && selectedCandidate && !context.selectedCandidates[itemId]) {
+    context.selectedCandidates[itemId] = selectedCandidate;
+  }
+  const selectedLabel = context.selectedLabels[itemId]
+    || (selectedCandidate
+      ? candidateLabel(selectedCandidate)
+      : (item.ledger_name ? `${item.ledger_name} (${selectedCode})` : selectedCode));
+  const searchValue = context.queries[itemId] || (selectedCode ? selectedLabel : '');
+  const optionsId = `audit-candidate-options-${itemId}`;
+
+  return `
+    <div class="manual-candidate-picker" data-id="${escapeHtml(item.id)}">
+      <input
+        class="candidate-search-input"
+        data-id="${escapeHtml(item.id)}"
+        type="search"
+        value="${escapeHtml(searchValue)}"
+        placeholder="模糊搜索品名/规格/编码"
+        title="输入品名、规格或科目编码进行模糊搜索"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls="${escapeHtml(optionsId)}"
+        aria-expanded="false"
+        autocomplete="off"
+      />
+      <div class="candidate-options hidden" id="${escapeHtml(optionsId)}" role="listbox"></div>
+    </div>
+  `;
+}
+
+function handleAuditCandidateSelection(itemId, selectedCode, candidate) {
+  const item = state.auditPreview?.items?.find(it => String(it.id) === String(itemId));
+  if (!item) return;
+
+  if (!selectedCode) {
+    item.ledger_code = '';
+    item.ledger_name = '';
+    item.ledger_qty = 0;
+    item.ledger_amount = 0;
+    item.matched = false;
+    item.checked = false;
+    item.match_method = '未自动匹配';
+  } else if (candidate) {
+    item.ledger_code = candidate.code;
+    item.ledger_name = candidate.name;
+    item.ledger_qty = candidate.qty;
+    item.ledger_amount = candidate.amount;
+    item.matched = true;
+    item.checked = true;
+    item.match_method = '人工指定';
+  }
+
+  renderComparePreviewTable();
+  updatePreviewStats();
+}
+
 // 渲染第一步映射对照预览表格
 function renderComparePreviewTable() {
   const tbody = document.getElementById('compare-preview-table')?.querySelector('tbody');
@@ -1548,20 +1912,8 @@ function renderComparePreviewTable() {
       tr.className = 'row-unmatched';
     }
 
-    // 手动调整下拉选项构建
-    let candidateSelectHtml = '';
-    if (it.candidates && it.candidates.length > 0) {
-      candidateSelectHtml = `<select class="candidate-select" data-id="${it.id}">`;
-      candidateSelectHtml += `<option value="">-- 手动选择科目 --</option>`;
-      it.candidates.forEach(c => {
-        const isSel = c.code === it.ledger_code ? 'selected' : '';
-        candidateSelectHtml += `<option value="${escapeHtml(c.code)}" ${isSel}>${escapeHtml(c.name)} (${escapeHtml(c.code)}) [存:${c.qty}]</option>`;
-      });
-      candidateSelectHtml += `<option value="__NONE__">【置空/不关联】</option>`;
-      candidateSelectHtml += `</select>`;
-    } else {
-      candidateSelectHtml = `<span style="color: var(--text-muted); font-size: 11px;">无相近科目</span>`;
-    }
+    // 手动调整：支持在当前候选之外按品名、规格或科目编码模糊检索总账。
+    const candidatePickerHtml = renderAuditCandidatePicker(it);
 
     const ledgerCodeText = it.ledger_code
       ? `<span style="font-family: monospace; color: #38bdf8; font-weight: 600;">${escapeHtml(it.ledger_code)}</span>`
@@ -1591,10 +1943,18 @@ function renderComparePreviewTable() {
       <td>${ledgerNameText}</td>
       <td style="text-align: right; font-family: monospace; color: #a5f3fc;">${ledgerQtyText}</td>
       <td>${getMethodBadgeHtml(it.match_method)}</td>
-      <td style="text-align: center;">${candidateSelectHtml}</td>
+      <td style="text-align: center;">${candidatePickerHtml}</td>
     `;
     tbody.appendChild(tr);
   });
+
+  bindManualCandidatePickers(
+    document.getElementById('compare-preview-table'),
+    'audit',
+    itemId => state.auditPreview?.items?.find(item => String(item.id) === String(itemId))?.ledger_code || '',
+    itemId => state.auditPreview?.items?.find(item => String(item.id) === String(itemId))?.category || '',
+    handleAuditCandidateSelection
+  );
 }
 
 // 渲染核对结果仪表盘卡片群
@@ -1702,6 +2062,98 @@ function renderCompareTable() {
 }
 
 // ----------------------------------------------------
+// 人工确认工作区：内嵌 / 独立操作区 / 全屏
+// ----------------------------------------------------
+const manualWorkspaceState = {
+  activePanel: null
+};
+
+function updateManualWorkspaceControls(panel) {
+  if (!panel) return;
+
+  const expanded = panel.classList.contains('manual-workspace-expanded');
+  const fullscreen = panel.classList.contains('manual-workspace-fullscreen');
+
+  panel.querySelectorAll('[data-manual-workspace-action]').forEach(button => {
+    const action = button.dataset.manualWorkspaceAction;
+    if (action === 'expand') {
+      button.classList.toggle('hidden', expanded);
+    } else if (action === 'fullscreen') {
+      button.classList.toggle('hidden', !expanded);
+      button.textContent = fullscreen ? '⤓ 窗口化' : '⤢ 全屏';
+      button.title = fullscreen ? '恢复为带边距的独立操作区' : '让独立操作区占满应用窗口';
+    } else if (action === 'restore') {
+      button.classList.toggle('hidden', !expanded);
+    }
+  });
+}
+
+function openManualWorkspace(panel) {
+  if (!panel) return;
+
+  const currentPanel = document.querySelector('.manual-workspace-expanded');
+  if (currentPanel && currentPanel !== panel) {
+    closeManualWorkspace(currentPanel);
+  }
+
+  panel.classList.add('manual-workspace-expanded');
+  panel.classList.remove('manual-workspace-fullscreen');
+  document.body.classList.add('manual-workspace-open');
+  manualWorkspaceState.activePanel = panel;
+  updateManualWorkspaceControls(panel);
+}
+
+function toggleManualWorkspaceFullscreen(panel) {
+  if (!panel || !panel.classList.contains('manual-workspace-expanded')) return;
+
+  panel.classList.toggle('manual-workspace-fullscreen');
+  updateManualWorkspaceControls(panel);
+}
+
+function closeManualWorkspace(panel) {
+  if (!panel) return;
+
+  panel.classList.remove('manual-workspace-expanded', 'manual-workspace-fullscreen');
+  if (manualWorkspaceState.activePanel === panel) {
+    manualWorkspaceState.activePanel = null;
+  }
+
+  if (!document.querySelector('.manual-workspace-expanded')) {
+    document.body.classList.remove('manual-workspace-open');
+  }
+  updateManualWorkspaceControls(panel);
+}
+
+function initManualWorkspaceControls() {
+  document.querySelectorAll('[data-manual-workspace]').forEach(panel => {
+    panel.querySelectorAll('[data-manual-workspace-action]').forEach(button => {
+      button.addEventListener('click', () => {
+        const action = button.dataset.manualWorkspaceAction;
+        if (action === 'expand') {
+          openManualWorkspace(panel);
+        } else if (action === 'fullscreen') {
+          toggleManualWorkspaceFullscreen(panel);
+        } else if (action === 'restore') {
+          closeManualWorkspace(panel);
+        }
+      });
+    });
+    updateManualWorkspaceControls(panel);
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (document.querySelector('.modal-overlay:not(.hidden)')) return;
+
+    const panel = document.querySelector('.manual-workspace-expanded');
+    if (panel) {
+      event.preventDefault();
+      closeManualWorkspace(panel);
+    }
+  });
+}
+
+// ----------------------------------------------------
 // 8. 全局 Tab 切换与应用初始化
 // ----------------------------------------------------
 function setupTabNavigation() {
@@ -1710,6 +2162,9 @@ function setupTabNavigation() {
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
+      const expandedWorkspace = document.querySelector('.manual-workspace-expanded');
+      if (expandedWorkspace) closeManualWorkspace(expandedWorkspace);
+
       const targetId = tab.dataset.tab;
       state.activeTab = targetId;
 
@@ -1767,6 +2222,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initTabInbound();
   initTabCompare();
   initTabConfig();
+  initManualWorkspaceControls();
 
   // 预载配置与自动扫描
   loadConfigData();

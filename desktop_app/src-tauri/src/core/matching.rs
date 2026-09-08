@@ -256,6 +256,108 @@ fn to_candidate_option(entry: &LedgerEntry) -> LedgerCandidateOption {
     }
 }
 
+fn subsequence_score(needle: &str, haystack: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    let mut haystack_chars = haystack.chars();
+    let mut matched = 0;
+    for needle_char in needle.chars() {
+        if haystack_chars.any(|haystack_char| haystack_char == needle_char) {
+            matched += 1;
+        } else {
+            return None;
+        }
+    }
+
+    Some(matched)
+}
+
+fn fuzzy_field_score(query: &str, value: &str, weight: i32) -> i32 {
+    let clean_value = clean_text(value);
+    if clean_value.is_empty() {
+        return 0;
+    }
+    if clean_value == query {
+        return weight * 3;
+    }
+    if clean_value.contains(query) {
+        return weight * 2;
+    }
+    subsequence_score(query, &clean_value)
+        .map(|matched| weight + matched)
+        .unwrap_or(0)
+}
+
+/// 按品名、规格或科目编码模糊搜索总账候选科目。
+///
+/// 手工调整不能只依赖默认的 25 条相近候选：用户可能只记得科目编码的一部分，
+/// 或者药品名称与库管名称差异较大。因此这里对完整总账做检索，并优先返回编码、
+/// 品名、规格的精确/包含命中项。
+pub fn search_ledger_candidates(
+    query: &str,
+    ledger_entries: &[LedgerEntry],
+    limit: usize,
+) -> Vec<LedgerCandidateOption> {
+    search_ledger_candidates_for_category(query, ledger_entries, None, limit)
+}
+
+/// 在指定库房对应的总账科目范围内进行模糊搜索。
+///
+/// 账实核对的预览项已经按库房分组，人工搜索也必须保持同一范围，避免在西药房
+/// 的行里误选中药房或耗材科目。入库、出库场景不传分类时仍搜索完整总账。
+pub fn search_ledger_candidates_for_category(
+    query: &str,
+    ledger_entries: &[LedgerEntry],
+    category: Option<&str>,
+    limit: usize,
+) -> Vec<LedgerCandidateOption> {
+    let clean_query = clean_text(query);
+    if clean_query.is_empty() {
+        return Vec::new();
+    }
+
+    let category = category.map(clean_text).unwrap_or_default();
+    let in_category = |entry: &LedgerEntry| match category.as_str() {
+        "西药房" => entry.code.starts_with("1201_XY"),
+        "中药房" => entry.code.starts_with("1201_ZY") || entry.code.starts_with("1201_KL"),
+        "耗材库" => entry.code.starts_with("1201_HC"),
+        _ => true,
+    };
+
+    let max_results = limit.clamp(1, 100);
+    let mut scored: Vec<(i32, usize, &LedgerEntry)> = ledger_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| in_category(entry))
+        .filter_map(|(index, entry)| {
+            let score = [
+                fuzzy_field_score(&clean_query, &entry.code, 100),
+                fuzzy_field_score(&clean_query, &entry.aux_code, 90),
+                fuzzy_field_score(&clean_query, &entry.drug_name, 80),
+                fuzzy_field_score(&clean_query, &entry.spec, 60),
+                fuzzy_field_score(&clean_query, &entry.name_full, 50),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+
+            (score > 0).then_some((score, index, entry))
+        })
+        .collect();
+
+    scored.sort_by(|(score_a, index_a, _), (score_b, index_b, _)| {
+        score_b.cmp(score_a).then_with(|| index_a.cmp(index_b))
+    });
+
+    scored
+        .into_iter()
+        .take(max_results)
+        .map(|(_, _, entry)| to_candidate_option(entry))
+        .collect()
+}
+
 /// 为药品生成人工选择候选项。
 ///
 /// 优先返回品名包含关系命中的总账科目，最多 15 个；不足 25 个时再按
@@ -411,5 +513,43 @@ mod tests {
         .expect("应返回人工指定的科目");
 
         assert_eq!(resolved.code, "1201_MANUAL");
+    }
+
+    #[test]
+    fn fuzzy_candidate_search_matches_partial_code_name_and_spec() {
+        let ledger = vec![
+            entry("1201_XY0001", "阿莫西林胶囊"),
+            entry("1201_XY0069", "5%葡萄糖注射液"),
+            entry("1201_ZY0001", "制吴茱萸"),
+        ];
+
+        assert_eq!(
+            search_ledger_candidates("XY0069", &ledger, 10)
+                .first()
+                .map(|candidate| candidate.code.as_str()),
+            Some("1201_XY0069")
+        );
+        assert_eq!(
+            search_ledger_candidates("葡萄糖", &ledger, 10)
+                .first()
+                .map(|candidate| candidate.code.as_str()),
+            Some("1201_XY0069")
+        );
+        assert_eq!(
+            search_ledger_candidates("茱萸", &ledger, 10)
+                .first()
+                .map(|candidate| candidate.code.as_str()),
+            Some("1201_ZY0001")
+        );
+
+        assert_eq!(
+            search_ledger_candidates_for_category("茱萸", &ledger, Some("中药房"), 10)
+                .first()
+                .map(|candidate| candidate.code.as_str()),
+            Some("1201_ZY0001")
+        );
+        assert!(
+            search_ledger_candidates_for_category("茱萸", &ledger, Some("西药房"), 10).is_empty()
+        );
     }
 }

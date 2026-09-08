@@ -219,6 +219,26 @@ fn execute_sales_process(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn search_ledger_candidates(
+    ledger: String,
+    query: String,
+    limit: Option<usize>,
+    category: Option<String>,
+) -> Result<Value, String> {
+    let entries = core::ledger::load_ledger_entries(Path::new(&ledger))?;
+    let candidates = core::matching::search_ledger_candidates_for_category(
+        &query,
+        &entries,
+        category.as_deref(),
+        limit.unwrap_or(50),
+    );
+    Ok(json!({
+        "success": true,
+        "candidates": candidates
+    }))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 fn execute_outbound_voucher(
     app: tauri::AppHandle,
@@ -442,6 +462,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_files,
             execute_sales_process,
+            search_ledger_candidates,
             execute_outbound_voucher,
             execute_inbound_voucher,
             execute_inventory_audit,

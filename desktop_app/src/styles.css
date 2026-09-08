@@ -753,6 +753,91 @@ body {
   gap: 12px;
 }
 
+/* 人工确认工作区：保留原位置，同时支持独立操作区和全屏处理 */
+body.manual-workspace-open {
+  overscroll-behavior: none;
+}
+
+body.manual-workspace-open::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(3, 7, 18, 0.78);
+  backdrop-filter: blur(3px);
+}
+
+.manual-workspace-expanded {
+  position: fixed !important;
+  inset: 16px !important;
+  z-index: 1001 !important;
+  width: auto !important;
+  height: calc(100vh - 32px) !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 18px !important;
+  overflow: hidden !important;
+  border-radius: var(--radius-lg) !important;
+  background: #111827 !important;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(45, 212, 191, 0.2) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 14px !important;
+  animation: manualWorkspaceOpen 0.18s ease-out;
+}
+
+.manual-workspace-expanded.manual-workspace-fullscreen {
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  border-radius: 0 !important;
+}
+
+@keyframes manualWorkspaceOpen {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.manual-workspace-expanded > .table-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none !important;
+  overflow: auto;
+}
+
+.manual-workspace-expanded > .unmatched-header {
+  flex: 0 0 auto;
+  align-items: flex-start;
+}
+
+.manual-workspace-expanded > .result-header {
+  flex: 0 0 auto;
+}
+
+.manual-workspace-expanded .unmatched-title {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.manual-workspace-expanded .unmatched-actions,
+.manual-workspace-expanded .result-actions {
+  flex-shrink: 0;
+}
+
+.manual-workspace-expanded .candidate-options {
+  z-index: 1002;
+}
+
+.manual-workspace-control {
+  white-space: nowrap;
+}
+
 .unmatched-title {
   display: flex;
   align-items: center;
@@ -1152,14 +1237,45 @@ body {
 
 .manual-match-cell {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
-  min-width: 250px;
+  min-width: 290px;
 }
 
-.manual-match-cell .candidate-select {
-  min-width: 210px;
+.manual-candidate-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 220px;
   max-width: 320px;
+}
+
+.candidate-search-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  border-radius: 4px;
+  padding: 5px 7px;
+  font-size: 11px;
+  outline: none;
+  user-select: text;
+}
+
+.candidate-search-input::placeholder {
+  color: #64748b;
+}
+
+.candidate-search-input:focus {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 1px #2dd4bf;
+}
+
+#compare-preview-table .manual-candidate-picker {
+  min-width: 230px;
 }
 
 .btn:disabled {
@@ -1329,7 +1445,7 @@ body {
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
-/* 智能映射预览徽标与下拉框 */
+/* 智能映射预览徽标与手工科目组合框 */
 .badge-method {
   display: inline-flex;
   align-items: center;
@@ -1382,22 +1498,61 @@ body {
   border: 1px solid rgba(148, 163, 184, 0.3);
 }
 
-.candidate-select {
+.manual-candidate-picker {
+  position: relative;
   width: 100%;
-  max-width: 180px;
-  background: #0f172a;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #e2e8f0;
-  border-radius: 4px;
-  padding: 4px 6px;
-  font-size: 11px;
-  outline: none;
-  cursor: pointer;
 }
 
-.candidate-select:focus {
-  border-color: #2dd4bf;
-  box-shadow: 0 0 0 1px #2dd4bf;
+.candidate-options {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 250px;
+  overflow-y: auto;
+  padding: 4px;
+  background: #111b2f;
+  border: 1px solid rgba(45, 212, 191, 0.55);
+  border-radius: 7px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+}
+
+.candidate-option {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #dbeafe;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.candidate-option:hover,
+.candidate-option.is-selected {
+  background: rgba(45, 212, 191, 0.16);
+  color: #f0fdfa;
+}
+
+.candidate-option-none {
+  margin-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #fbbf24;
+}
+
+.candidate-option-empty {
+  padding: 8px 9px;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
 }
 
 #compare-preview-table tbody tr.row-unmatched {

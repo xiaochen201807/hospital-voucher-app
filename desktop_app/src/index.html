@@ -325,13 +325,22 @@
               <p id="outbound-depletion-summary" class="panel-desc result-note"></p>
 
               <!-- 未匹配新药表格 -->
-              <div id="outbound-unmatched-box" class="unmatched-box hidden">
+              <div id="outbound-unmatched-box" class="unmatched-box hidden" data-manual-workspace="outbound">
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">安全告警</span>
                     <span>发现 <strong id="outbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户；可在下方选择候选科目后重新生成）：</span>
                   </div>
                   <div class="unmatched-actions">
+                    <button class="btn btn-outline btn-xs manual-workspace-control" data-manual-workspace-action="expand" title="展开为独立操作区，便于批量确认科目">
+                      ↗ 独立操作区
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="fullscreen" title="让独立操作区占满应用窗口">
+                      ⤢ 全屏
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="restore" title="还原为当前页面中的嵌入布局">
+                      ↙ 还原嵌入
+                    </button>
                     <button id="btn-rerun-outbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方人工选择的财务存货科目重新生成凭证">
                       ✓ 按手工匹配重新生成
                     </button>
@@ -510,13 +519,22 @@
               </div>
 
               <!-- 未匹配新药提醒 -->
-              <div id="inbound-unmatched-box" class="unmatched-box hidden">
+              <div id="inbound-unmatched-box" class="unmatched-box hidden" data-manual-workspace="inbound">
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">安全告警</span>
                     <span>发现 <strong id="inbound-unmatched-count-text">0</strong> 个药品在总账中未查到存货科目编码（已在凭证中安全置空防串户；可在下方选择候选科目后重新生成）：</span>
                   </div>
                   <div class="unmatched-actions">
+                    <button class="btn btn-outline btn-xs manual-workspace-control" data-manual-workspace-action="expand" title="展开为独立操作区，便于批量确认科目">
+                      ↗ 独立操作区
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="fullscreen" title="让独立操作区占满应用窗口">
+                      ⤢ 全屏
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="restore" title="还原为当前页面中的嵌入布局">
+                      ↙ 还原嵌入
+                    </button>
                     <button id="btn-rerun-inbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方人工选择的财务存货科目重新生成凭证">
                       ✓ 按手工匹配重新生成
                     </button>
@@ -640,7 +658,7 @@
             </div>
 
             <!-- 第一步：智能映射预览与人工确认卡片 -->
-            <div id="compare-preview-card" class="card result-card hidden" style="margin-top: 20px;">
+            <div id="compare-preview-card" class="card result-card hidden" style="margin-top: 20px;" data-manual-workspace="audit">
               <div class="result-header" style="flex-direction: column; align-items: stretch; gap: 12px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                   <div class="result-status">
@@ -650,6 +668,15 @@
                     </div>
                   </div>
                   <div class="result-actions" style="display: flex; gap: 10px;">
+                    <button class="btn btn-outline btn-sm manual-workspace-control" data-manual-workspace-action="expand" title="展开为独立操作区，便于批量确认科目">
+                      ↗ 独立操作区
+                    </button>
+                    <button class="btn btn-outline btn-sm manual-workspace-control hidden" data-manual-workspace-action="fullscreen" title="让独立操作区占满应用窗口">
+                      ⤢ 全屏
+                    </button>
+                    <button class="btn btn-outline btn-sm manual-workspace-control hidden" data-manual-workspace-action="restore" title="还原为当前页面中的嵌入布局">
+                      ↙ 还原嵌入
+                    </button>
                     <button id="btn-preview-select-all" class="btn btn-outline btn-sm">全选</button>
                     <button id="btn-preview-deselect-all" class="btn btn-outline btn-sm">取消全选</button>
                     <button id="btn-confirm-and-run-compare" class="btn btn-primary btn-sm" style="background: linear-gradient(135deg, #10b981, #059669);">
