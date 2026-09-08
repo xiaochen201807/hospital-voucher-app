@@ -252,6 +252,8 @@ python3 generate_inbound_voucher.py -d 2026-08-31 -v 20
 
 为了让医院财务和药库人员日常操作更加直观便捷，免除终端敲命令与安装环境的困扰，系统已基于 **Rust + Tauri 2.0** 封装了全新现代化轻奢桌面客户端：
 
+> 维护说明：可视化桌面端以 `desktop_app/src-tauri/src/core` 为唯一业务实现。根目录 Python 脚本作为历史命令行兼容入口保留；新功能和规则调整应优先修改 Rust 内核，避免两套实现继续产生行为差异。
+
 - 📁 应用目录：[`desktop_app`](file:///Users/youyou/Downloads/python/desktop_app)
 - 🚀 快速启动（开发调试）：
   ```bash
@@ -272,9 +274,9 @@ python3 generate_inbound_voucher.py -d 2026-08-31 -v 20
 
 ---
 
-## 八、完整业务处理流程（脚本日常推荐）
+## 八、历史命令行兼容入口
 
-每个月收到药房销售报表与财务总账后，只需两步即可完成全套数据整理与凭证制作：
+如仍需使用旧的命令行入口，每个月收到药房销售报表与财务总账后，可以执行以下流程。可视化程序用户无需执行这些脚本：
 
 ```bash
 # 第一步：整理当月销售表，生成汇总后的 Sheet 2（销售明细）
@@ -303,4 +305,3 @@ python3 process_sales.py --help
 python3 generate_voucher.py --help
 python3 generate_inbound_voucher.py --help
 ```
-

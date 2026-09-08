@@ -1,10 +1,10 @@
 pub mod core;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use tauri::Manager;
 
 const CONFIG_FILE_NAME: &str = "factory_mapping.json";
@@ -61,6 +61,26 @@ fn load_runtime_config(
     }
 }
 
+fn serialize_command_result<T: Serialize>(result: Result<T, String>) -> Result<Value, String> {
+    match result {
+        Ok(value) => serde_json::to_value(value).map_err(|e| e.to_string()),
+        Err(error) => Ok(json!({ "success": false, "error": error })),
+    }
+}
+
+fn run_with_runtime_config<T, F>(
+    app: &tauri::AppHandle,
+    custom_config: Option<&str>,
+    action: F,
+) -> Result<Value, String>
+where
+    T: Serialize,
+    F: FnOnce(&core::config::ConfigData) -> Result<T, String>,
+{
+    let (config, _) = load_runtime_config(app, custom_config);
+    serialize_command_result(action(&config))
+}
+
 fn save_runtime_config(
     app: &tauri::AppHandle,
     data: &core::config::ConfigData,
@@ -90,7 +110,9 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
             cur
         } else {
             // 尝试用户主目录下的 Downloads 或 Desktop 目录
-            let home_opt = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+            let home_opt = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok();
             let mut fallback = cur.clone();
             if let Some(h) = home_opt {
                 let dl = PathBuf::from(&h).join("Downloads");
@@ -132,8 +154,16 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
         files.sort();
 
         for p in files {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-            let abs_path = p.canonicalize().unwrap_or(p.clone()).to_string_lossy().to_string();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let abs_path = p
+                .canonicalize()
+                .unwrap_or(p.clone())
+                .to_string_lossy()
+                .to_string();
             let item = ScannedItem {
                 name: name.clone(),
                 path: abs_path,
@@ -153,11 +183,17 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
             if name.contains("模板") {
                 res.template_files.push(item.clone());
             }
-            if name.contains("西药") && (name.contains("库存") || name.contains("报表") || name.contains("房")) {
+            if name.contains("西药")
+                && (name.contains("库存") || name.contains("报表") || name.contains("房"))
+            {
                 res.west_wh_files.push(item.clone());
-            } else if name.contains("中药") && (name.contains("库存") || name.contains("报表") || name.contains("房")) {
+            } else if name.contains("中药")
+                && (name.contains("库存") || name.contains("报表") || name.contains("房"))
+            {
                 res.tcm_wh_files.push(item.clone());
-            } else if (name.contains("耗材") || name.contains("材料")) && (name.contains("库存") || name.contains("报表") || name.contains("库")) {
+            } else if (name.contains("耗材") || name.contains("材料"))
+                && (name.contains("库存") || name.contains("报表") || name.contains("库"))
+            {
                 res.hc_wh_files.push(item.clone());
             }
         }
@@ -170,11 +206,16 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn execute_sales_process(file: String, output: Option<String>, sheet_name: Option<String>) -> Result<Value, String> {
-    match core::sales::process_sales_file(&file, output.as_deref(), sheet_name.as_deref()) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+fn execute_sales_process(
+    file: String,
+    output: Option<String>,
+    sheet_name: Option<String>,
+) -> Result<Value, String> {
+    serialize_command_result(core::sales::process_sales_file(
+        &file,
+        output.as_deref(),
+        sheet_name.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -189,19 +230,17 @@ fn execute_outbound_voucher(
     fallback_price: Option<bool>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = load_runtime_config(&app, config.as_deref());
-    match core::outbound::generate_outbound_voucher(
-        &sales,
-        &ledger,
-        &template,
-        output.as_deref(),
-        date.as_deref(),
-        fallback_price.unwrap_or(true),
-        &cfg,
-    ) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::outbound::generate_outbound_voucher(
+            &sales,
+            &ledger,
+            &template,
+            output.as_deref(),
+            date.as_deref(),
+            fallback_price.unwrap_or(true),
+            cfg,
+        )
+    })
 }
 
 #[tauri::command]
@@ -216,19 +255,17 @@ fn execute_inbound_voucher(
     voucher_no: Option<String>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = load_runtime_config(&app, config.as_deref());
-    match core::inbound::generate_inbound_voucher(
-        &inbound,
-        &ledger,
-        &template,
-        output.as_deref(),
-        date.as_deref(),
-        voucher_no.as_deref(),
-        &cfg,
-    ) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::inbound::generate_inbound_voucher(
+            &inbound,
+            &ledger,
+            &template,
+            output.as_deref(),
+            date.as_deref(),
+            voucher_no.as_deref(),
+            cfg,
+        )
+    })
 }
 
 #[tauri::command]
@@ -240,17 +277,15 @@ fn preview_inventory_audit_mapping(
     hc: Option<String>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = load_runtime_config(&app, config.as_deref());
-    match core::audit::preview_inventory_audit_mapping(
-        &ledger,
-        west.as_deref(),
-        tcm.as_deref(),
-        hc.as_deref(),
-        &cfg,
-    ) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::audit::preview_inventory_audit_mapping(
+            &ledger,
+            west.as_deref(),
+            tcm.as_deref(),
+            hc.as_deref(),
+            cfg,
+        )
+    })
 }
 
 #[tauri::command]
@@ -261,16 +296,14 @@ fn execute_inventory_audit_with_mapping(
     output: Option<String>,
     config: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = load_runtime_config(&app, config.as_deref());
-    match core::audit::execute_inventory_audit_with_mapping(
-        &ledger,
-        confirmed_items,
-        output.as_deref(),
-        &cfg,
-    ) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::audit::execute_inventory_audit_with_mapping(
+            &ledger,
+            confirmed_items,
+            output.as_deref(),
+            cfg,
+        )
+    })
 }
 
 #[tauri::command]
@@ -283,18 +316,16 @@ fn execute_inventory_audit(
     config: Option<String>,
     output: Option<String>,
 ) -> Result<Value, String> {
-    let (cfg, _) = load_runtime_config(&app, config.as_deref());
-    match core::audit::run_inventory_audit(
-        &ledger,
-        west.as_deref(),
-        tcm.as_deref(),
-        hc.as_deref(),
-        output.as_deref(),
-        &cfg,
-    ) {
-        Ok(res) => serde_json::to_value(res).map_err(|e| e.to_string()),
-        Err(err) => Ok(json!({ "success": false, "error": err })),
-    }
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::audit::run_inventory_audit(
+            &ledger,
+            west.as_deref(),
+            tcm.as_deref(),
+            hc.as_deref(),
+            output.as_deref(),
+            cfg,
+        )
+    })
 }
 
 #[tauri::command]
@@ -308,10 +339,18 @@ fn get_config(app: tauri::AppHandle, config: Option<String>) -> Result<Value, St
 }
 
 #[tauri::command]
-fn save_config(app: tauri::AppHandle, data: String, config: Option<String>) -> Result<Value, String> {
+fn save_config(
+    app: tauri::AppHandle,
+    data: String,
+    config: Option<String>,
+) -> Result<Value, String> {
     let cfg_data: core::config::ConfigData = match serde_json::from_str(&data) {
         Ok(d) => d,
-        Err(e) => return Ok(json!({ "success": false, "error": format!("解析配置 JSON 格式失败: {}", e) })),
+        Err(e) => {
+            return Ok(
+                json!({ "success": false, "error": format!("解析配置 JSON 格式失败: {}", e) }),
+            )
+        }
     };
 
     match save_runtime_config(&app, &cfg_data, config.as_deref()) {
@@ -437,12 +476,17 @@ mod tests {
         let sales_path = project_file("2026.8月西药销售表.xls");
         let ledger_path = project_file("石家庄心理医院_数量金额总账_20260903150759.xlsx");
         let west_path = project_file("石家庄心理医院新西药房库存汇总报表2026831.xls");
-        let sales_res = core::sales::process_sales_file(&sales_path, None, None)
-            .expect("销售汇总处理必须成功");
+        let sales_res =
+            core::sales::process_sales_file(&sales_path, None, None).expect("销售汇总处理必须成功");
         assert_eq!(sales_res.totals.unique_count, 54);
         assert_eq!(sales_res.totals.original_count, 82);
         assert_eq!(sales_res.totals.total_qty as i64, 139353);
-        println!(">>> 纯 Rust 销售汇总验证成功: {} 种去重药品 (原 {} 笔), 总件数: {}", sales_res.totals.unique_count, sales_res.totals.original_count, sales_res.totals.total_qty);
+        println!(
+            ">>> 纯 Rust 销售汇总验证成功: {} 种去重药品 (原 {} 笔), 总件数: {}",
+            sales_res.totals.unique_count,
+            sales_res.totals.original_count,
+            sales_res.totals.total_qty
+        );
 
         let audit_res = core::audit::run_inventory_audit(
             &ledger_path,
@@ -450,8 +494,9 @@ mod tests {
             None,
             None,
             None,
-            &cfg
-        ).expect("账实核对处理必须成功");
+            &cfg,
+        )
+        .expect("账实核对处理必须成功");
 
         println!(
             ">>> 纯 Rust 账实核对成功: 总品规 {}, 吻合 {}, 差异 {}, 吻合率 {}%",

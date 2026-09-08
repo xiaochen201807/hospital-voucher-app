@@ -1,5 +1,8 @@
-use calamine::{open_workbook_auto, Data, Sheets};
+use calamine::{open_workbook_auto, Data, Reader, Sheets};
 use std::path::Path;
+
+/// 读取后的工作表数据。
+pub type SheetRows = Vec<Vec<Data>>;
 
 /// 从单元格数据转换为纯字符串（去除首尾空白）
 pub fn cell_as_string(cell: &Data) -> String {
@@ -36,15 +39,124 @@ pub fn cell_as_f64(cell: &Data) -> f64 {
 
 /// 在表头行中根据候选列名列表查找匹配的列索引
 pub fn find_col_idx(header: &[Data], candidates: &[&str]) -> Option<usize> {
+    let normalized_candidates: Vec<String> = candidates
+        .iter()
+        .map(|candidate| normalize_header(candidate))
+        .collect();
+
+    // 先做完整匹配，避免“金额”抢先匹配到“零售金额”等更具体的列。
     for (idx, cell) in header.iter().enumerate() {
-        let name = cell_as_string(cell).replace([' ', '\t', '\r', '\n'], "");
-        for cand in candidates {
-            if name.contains(cand) {
+        let name = normalize_header(&cell_as_string(cell));
+        if normalized_candidates.contains(&name) {
+            return Some(idx);
+        }
+    }
+
+    // 兼容医院系统导出的长表头，再使用模糊匹配；候选词按长度降序，优先具体别名。
+    let mut candidate_order: Vec<usize> = (0..normalized_candidates.len()).collect();
+    candidate_order.sort_by_key(|idx| std::cmp::Reverse(normalized_candidates[*idx].len()));
+    for candidate_idx in &candidate_order {
+        for (idx, cell) in header.iter().enumerate() {
+            let name = normalize_header(&cell_as_string(cell));
+            if name.contains(&normalized_candidates[*candidate_idx]) {
                 return Some(idx);
             }
         }
     }
     None
+}
+
+fn normalize_header(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !matches!(*c, ' ' | '\t' | '\r' | '\n' | '　'))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// 按工作表名称提示读取数据；未命中提示时使用第一个工作表。
+pub fn read_sheet_rows(
+    path: &Path,
+    sheet_hints: &[&str],
+    context: &str,
+) -> Result<(String, SheetRows), String> {
+    let mut workbook = open_excel(path)?;
+    let sheet_names = workbook.sheet_names();
+    let sheet_name = sheet_names
+        .iter()
+        .find(|name| sheet_hints.iter().any(|hint| name.contains(hint)))
+        .cloned()
+        .or_else(|| sheet_names.first().cloned())
+        .ok_or_else(|| format!("{}中无有效工作表", context))?;
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| format!("读取{}失败: {}", context, e))?;
+    let rows = range.rows().map(|row| row.to_vec()).collect();
+    Ok((sheet_name, rows))
+}
+
+/// 在前若干行中定位表头，统一处理找不到表头的错误。
+pub fn find_header_row(
+    rows: &[Vec<Data>],
+    candidates: &[&str],
+    scan_limit: usize,
+    context: &str,
+) -> Result<usize, String> {
+    rows.iter()
+        .take(scan_limit)
+        .position(|row| find_col_idx(row, candidates).is_some())
+        .ok_or_else(|| format!("{}中未能在前{}行找到有效表头", context, scan_limit))
+}
+
+pub fn required_col(header: &[Data], candidates: &[&str], label: &str) -> Result<usize, String> {
+    find_col_idx(header, candidates).ok_or_else(|| format!("表头中缺少必需列：{}", label))
+}
+
+pub fn optional_col(header: &[Data], candidates: &[&str], fallback: usize) -> usize {
+    find_col_idx(header, candidates).unwrap_or(fallback)
+}
+
+pub fn row_as_string(row: &[Data], col: usize) -> String {
+    row.get(col).map(cell_as_string).unwrap_or_default()
+}
+
+pub fn row_as_f64(row: &[Data], col: usize) -> f64 {
+    row.get(col).map(cell_as_f64).unwrap_or(0.0)
+}
+
+pub fn is_summary_row(name: &str) -> bool {
+    name.is_empty() || name.contains("合计") || name.contains("总计")
+}
+
+pub fn amount_or_product(amount: f64, qty: f64, price: f64) -> f64 {
+    if amount == 0.0 && qty > 0.0 && price > 0.0 {
+        (qty * price * 100.0).round() / 100.0
+    } else {
+        amount
+    }
+}
+
+pub fn collect_source_dates(
+    rows: &[Vec<Data>],
+    start_row: usize,
+    name_col: usize,
+    date_col: Option<usize>,
+) -> Vec<String> {
+    let Some(date_col) = date_col else {
+        return Vec::new();
+    };
+
+    rows.iter()
+        .skip(start_row)
+        .filter_map(|row| {
+            if is_summary_row(&row_as_string(row, name_col)) {
+                return None;
+            }
+            let value = row_as_string(row, date_col);
+            (!value.is_empty()).then_some(value)
+        })
+        .collect()
 }
 
 /// 打开任意 Excel 文件 (.xlsx 或 .xls)
@@ -80,9 +192,10 @@ pub fn open_excel(path: &Path) -> Result<Sheets<std::io::BufReader<std::fs::File
                     || sample_str.contains("<?xml")
                     || sample_str.contains("xmlns:")
                 {
-                    return Err(format!(
+                    return Err(
                         "该文件疑似为医院/库管系统导出的 HTML/XML 网页伪表格（非标准 Excel 二进制文件）。\n\n【解决方法】：请先用 WPS 或 Microsoft Excel 打开该报表，点击【文件】->【另存为】，格式选择【Excel 工作簿 (*.xlsx)】保存后再重新导入！"
-                    ));
+                            .to_string(),
+                    );
                 }
 
                 if n == 0 {
@@ -98,3 +211,31 @@ pub fn open_excel(path: &Path) -> Result<Sheets<std::io::BufReader<std::fs::File
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_header_match_beats_broad_contains_match() {
+        let header = vec![
+            Data::String("零售金额".to_string()),
+            Data::String("进价金额".to_string()),
+        ];
+
+        assert_eq!(find_col_idx(&header, &["金额", "进价金额"]), Some(1));
+    }
+
+    #[test]
+    fn amount_falls_back_to_quantity_times_price() {
+        assert_eq!(amount_or_product(0.0, 3.0, 1.234), 3.70);
+        assert_eq!(amount_or_product(9.99, 3.0, 1.234), 9.99);
+    }
+
+    #[test]
+    fn summary_rows_are_shared_by_all_importers() {
+        assert!(is_summary_row("合计"));
+        assert!(is_summary_row("总计金额"));
+        assert!(is_summary_row(""));
+        assert!(!is_summary_row("阿莫西林"));
+    }
+}

@@ -68,8 +68,6 @@ npm run tauri build
 
 ```
 desktop_app/
-├── backend/
-│   └── runner.py            # Tauri 与业务核心的自动化调度桥梁（输入输出全 JSON 规范）
 ├── src/                     # 前端现代轻奢 UI
 │   ├── index.html           # 四大功能 Tab、借贷平衡仪表盘、未建档新药表格
 │   ├── styles.css           # 玻璃拟态设计体系与响应式布局
@@ -79,6 +77,13 @@ desktop_app/
 │   ├── tauri.conf.json      # 窗口参数、权限与品牌配置
 │   └── src/
 │       ├── main.rs          # 应用入口
-│       └── lib.rs           # 暴露给前端的系统级安全命令
+│       ├── lib.rs           # 暴露给前端的系统级安全命令
+│       └── core/             # 统一业务内核
+│           ├── excel_utils.rs    # Excel 读取、表头和数值处理
+│           ├── ledger.rs         # 总账读取与分类
+│           ├── matching.rs       # 药品/厂家匹配
+│           ├── supplier.rs       # 供应商字典与匹配
+│           ├── voucher_writer.rs # 凭证模板与分录写入
+│           └── sales/inbound/outbound/audit.rs
 └── package.json
 ```

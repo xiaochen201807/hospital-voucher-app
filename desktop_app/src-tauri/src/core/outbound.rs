@@ -1,24 +1,22 @@
 use crate::core::config::{clean_text, ConfigData};
-use crate::core::excel_utils::{cell_as_f64, cell_as_string, find_col_idx, open_excel};
-use calamine::Reader;
-use rust_xlsxwriter::{Format, FormatBorder, Workbook};
+use crate::core::excel_utils::{
+    collect_source_dates, find_header_row, is_summary_row, optional_col, read_sheet_rows,
+    required_col, row_as_f64, row_as_string,
+};
+use crate::core::voucher_writer::{
+    copy_template_sheets, load_template_sheets, set_default_voucher_column_widths,
+    write_voucher_headers, write_voucher_line, VoucherFormats, VoucherLine,
+};
+use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UnmatchedDrug {
-    pub name: String,
-    pub target_name: String,
-    pub spec: String,
-    pub factory: String,
-    pub supplier: String,
-    pub qty: f64,
-    pub price: f64,
-    pub in_price: f64,
-    pub amount: f64,
-    pub in_amt: f64,
-    pub reason: String,
-}
+// 保留旧的模块路径，避免外部调用方因公共类型迁移而立即失效。
+pub use crate::core::ledger::load_ledger_entries;
+pub use crate::core::matching::{
+    extract_name_and_vendor_tag, match_drug, match_drug_with_method, strip_tcm_prefix,
+};
+pub use crate::core::models::{LedgerEntry, UnmatchedDrug};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutboundVoucherResult {
@@ -34,304 +32,6 @@ pub struct OutboundVoucherResult {
     pub unmatched_items: Vec<UnmatchedDrug>,
     #[serde(default)]
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LedgerEntry {
-    pub code: String,      // 如 1201_XY0001
-    pub aux_code: String,  // 如 XY0001
-    pub name_full: String, // 如 存货_西地兰注射液 0.4mg*2ml*10支/盒
-    pub drug_name: String, // 清洗后的药名
-    pub spec: String,
-    pub price: f64,
-    pub end_qty: f64,
-}
-
-/// 读取财务总账建立存货字典
-pub fn load_ledger_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, String> {
-    let mut wb = open_excel(ledger_path)?;
-    let sheet_name = wb
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| "总账中无有效工作表".to_string())?;
-
-    let range = wb
-        .worksheet_range(&sheet_name)
-        .map_err(|e| format!("读取总账失败: {}", e))?;
-
-    let mut entries = Vec::new();
-
-    for row in range.rows() {
-        if row.len() < 4 {
-            continue;
-        }
-        let code = cell_as_string(&row[0]);
-        if !code.starts_with("1201_") {
-            continue;
-        }
-
-        let name_full = cell_as_string(&row[1]);
-        let aux_code = code.replace("1201_", "");
-
-        // 解析药名与规格（通常格式为 "存货_药名 规格" 或 "存货_药名"）
-        let raw_name = name_full.trim_start_matches("存货_").trim();
-        let parts: Vec<&str> = raw_name.splitn(2, ' ').collect();
-        let drug_name = parts[0].to_string();
-        let spec = if parts.len() > 1 { parts[1].to_string() } else { String::new() };
-
-        // 结存数量位于第 17 列 (0-indexed: 16)
-        // 单价：优先取第 18 列【期末结存单价】(0-indexed: 17)，其次取第 6 列【期初单价】(0-indexed: 5)
-        let end_qty = if row.len() > 16 { cell_as_f64(&row[16]) } else { 0.0 };
-        let end_price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
-        let init_price = if row.len() > 5 { cell_as_f64(&row[5]) } else { 0.0 };
-        let price = if end_price > 0.0 {
-            end_price
-        } else if init_price > 0.0 {
-            init_price
-        } else {
-            0.0
-        };
-
-        entries.push(LedgerEntry {
-            code,
-            aux_code,
-            name_full,
-            drug_name,
-            spec,
-            price,
-            end_qty,
-        });
-    }
-
-    Ok(entries)
-}
-
-/// 常用中药炮制前缀列表
-const TCM_PREFIXES: &[&str] = &[
-    "制", "炒", "麸炒", "炙", "煅", "酒", "醋", "生", "清", "法", "姜", "焦", "蜜炙", "盐", "熟",
-];
-
-/// 剥离中药炮制前缀，获取核心本草名称（如 "制吴茱萸" -> "吴茱萸"，"麸炒苍术" -> "苍术"）
-pub fn strip_tcm_prefix(name: &str) -> &str {
-    for prefix in TCM_PREFIXES {
-        if let Some(stripped) = name.strip_prefix(prefix) {
-            if !stripped.is_empty() {
-                return stripped;
-            }
-        }
-    }
-    name
-}
-
-/// 从药名中解析基础品名与括号内的厂家标签（例如 "麸炒苍术（国瑞堂）" -> ("麸炒苍术", Some("国瑞堂"))）
-pub fn extract_name_and_vendor_tag(name: &str) -> (String, Option<String>) {
-    if let Some((start_idx, open_char)) = name.char_indices().find(|(_, c)| *c == '（' || *c == '(') {
-        let after_open = &name[start_idx + open_char.len_utf8()..];
-        if let Some(end_rel_idx) = after_open.find(|c| c == '）' || c == ')') {
-            let base = name[..start_idx].trim().to_string();
-            let tag = after_open[..end_rel_idx].trim().to_string();
-            if !tag.is_empty() {
-                return (base, Some(tag));
-            }
-        }
-    }
-    (name.to_string(), None)
-}
-
-/// 匹配药品存货科目（附带匹配方式说明，便于前端展示）
-pub fn match_drug_with_method(
-    drug_name: &str,
-    spec: &str,
-    factory: &str,
-    ledger: &[LedgerEntry],
-    config: &ConfigData,
-) -> Option<(LedgerEntry, String)> {
-    let clean_drug = clean_text(drug_name);
-    let clean_sp = clean_text(spec);
-    let clean_fac = clean_text(factory);
-
-    // 1. 提取厂家简称（三重智能容错）：
-    // 1) 库管厂家包含字典全称
-    // 2) 库管厂家直接包含核心简称（如包含 "国瑞堂"、"蕴德"、"盛方"、"国松堂"、"神农" 等）
-    // 3) 字典全称包含库管厂家（解决末尾截断，如 "河北国瑞堂药业有限公" 在 "河北国瑞堂药业有限公司" 内部）
-    let mut vendor_suffix = String::new();
-    if !clean_fac.is_empty() {
-        for (full, brief) in &config.factory_abbreviations {
-            let clean_full = clean_text(full);
-            let clean_brief = clean_text(brief);
-            if clean_fac.contains(&clean_full)
-                || (!clean_brief.is_empty() && clean_fac.contains(&clean_brief))
-                || (!clean_fac.is_empty() && clean_full.contains(&clean_fac) && clean_fac.len() >= 6)
-            {
-                vendor_suffix = brief.clone();
-                break;
-            }
-        }
-    }
-
-    // 0. 特殊手动指定覆盖（支持带厂家后缀的复合药名以及裸药名）
-    let mut override_cands = Vec::new();
-    if !vendor_suffix.is_empty() {
-        override_cands.push(clean_text(&format!("{}({})", drug_name, vendor_suffix)));
-        override_cands.push(clean_text(&format!("{}（{}）", drug_name, vendor_suffix)));
-        override_cands.push(clean_text(&format!("{}{}", drug_name, vendor_suffix)));
-    }
-    if !factory.is_empty() {
-        override_cands.push(clean_text(&format!("{}({})", drug_name, factory)));
-        override_cands.push(clean_text(&format!("{}（{}）", drug_name, factory)));
-    }
-    if !spec.is_empty() {
-        override_cands.push(clean_text(&format!("{}{}", drug_name, spec)));
-    }
-    override_cands.push(clean_drug.clone());
-
-    for (k, v) in &config.drug_code_overrides {
-        let clean_k = clean_text(k);
-        if override_cands.iter().any(|c| c == &clean_k) {
-            let trimmed_v = v.trim();
-            // 如果配置为空字符串 ""，代表该品规明确需拦截人工建档，立即返回 None 阻断穿透！
-            if trimmed_v.is_empty() {
-                return None;
-            }
-            if let Some(target) = ledger.iter().find(|e| e.code == trimmed_v || e.aux_code == trimmed_v) {
-                return Some((target.clone(), "手动配置指定".to_string()));
-            } else {
-                return None;
-            }
-        }
-    }
-
-    // 严格厂家后缀保护（如海螵蛸）
-    let is_strict_drug = config
-        .strict_vendor_suffix_drugs
-        .iter()
-        .any(|d| clean_text(d) == clean_drug);
-
-    // 优先级 1: 全名 + 厂家全词精准匹配
-    if !vendor_suffix.is_empty() {
-        let expected_with_vendor = format!("{}{}", clean_drug, clean_text(&vendor_suffix));
-        for e in ledger {
-            let e_clean = clean_text(&e.drug_name);
-            if e_clean == expected_with_vendor {
-                return Some((e.clone(), format!("厂家简称精准匹配 ({})", vendor_suffix)));
-            }
-        }
-    }
-
-    // 优先级 1.5: 财务总账品名括号厂家反向智能解析
-    // 若总账名称形如 "麸炒苍术（国瑞堂）"，当库管药名为 "麸炒苍术" 且厂家包含 "国瑞堂" 时自动配对
-    if !clean_fac.is_empty() {
-        for e in ledger {
-            let (l_base, l_tag_opt) = extract_name_and_vendor_tag(&e.drug_name);
-            if let Some(l_tag) = l_tag_opt {
-                let clean_l_base = clean_text(&l_base);
-                let clean_l_tag = clean_text(&l_tag);
-                if clean_l_base == clean_drug && clean_fac.contains(&clean_l_tag) {
-                    return Some((e.clone(), format!("总账括号厂家反向匹配 ({})", l_tag)));
-                }
-            }
-        }
-    }
-
-    // 严格厂家药品只允许命中“药名 + 厂家”的科目；厂家为空、未配置或未命中时，
-    // 都不能回退到同名通用科目，否则会造成串户。
-    if is_strict_drug {
-        return None;
-    }
-
-    // 优先级 2: 全名 + 规格精准一致
-    for e in ledger {
-        let e_name = clean_text(&e.drug_name);
-        let e_spec = clean_text(&e.spec);
-        if e_name == clean_drug && !clean_sp.is_empty() && e_spec == clean_sp {
-            return Some((e.clone(), "品名与规格完全一致".to_string()));
-        }
-    }
-
-    // 优先级 3: 仅全名完全一致（若有多条候选，必须通过规格明确排他匹配，严禁盲目取第一条）
-    let candidates: Vec<&LedgerEntry> = ledger
-        .iter()
-        .filter(|e| clean_text(&e.drug_name) == clean_drug)
-        .collect();
-
-    if candidates.len() == 1 {
-        return Some((candidates[0].clone(), "同名单品规自动关联".to_string()));
-    } else if candidates.len() > 1 {
-        // 尝试规格精准匹配或包含比对
-        let mut matched_cand = None;
-        let mut match_count = 0;
-        for c in &candidates {
-            let c_sp = clean_text(&c.spec);
-            if !c_sp.is_empty() && !clean_sp.is_empty() && (clean_sp == c_sp || clean_sp.contains(&c_sp) || c_sp.contains(&clean_sp)) {
-                matched_cand = Some((*c).clone());
-                match_count += 1;
-            }
-        }
-        if match_count == 1 {
-            return matched_cand.map(|c| (c, "同名规格排他命中".to_string()));
-        }
-    }
-
-    // 优先级 4: 中药炮制前缀智能兼容容错匹配（如 "吴茱萸" 匹配 "制吴茱萸"，"白术" 匹配 "炒白术"）
-    let stripped_clean_drug = clean_text(strip_tcm_prefix(&clean_drug));
-    let mut tcm_candidates = Vec::new();
-    for e in ledger {
-        let (e_base, e_tag_opt) = extract_name_and_vendor_tag(&e.drug_name);
-        let clean_e_base = clean_text(&e_base);
-        let stripped_clean_e = clean_text(strip_tcm_prefix(&clean_e_base));
-
-        // 核心草药名称一致
-        if stripped_clean_drug == stripped_clean_e
-            || clean_drug == stripped_clean_e
-            || stripped_clean_drug == clean_e_base
-        {
-            // 校验厂家无冲突
-            let mut vendor_ok = true;
-            if let Some(l_tag) = e_tag_opt {
-                let clean_tag = clean_text(&l_tag);
-                if !clean_fac.is_empty() && !clean_fac.contains(&clean_tag) {
-                    vendor_ok = false;
-                }
-            } else if !vendor_suffix.is_empty() {
-                // 如果库管指定了厂家，但该总账条目无厂家且账上有其他明确带厂家的科目，则优先避开
-                vendor_ok = true;
-            }
-
-            if vendor_ok {
-                tcm_candidates.push(e);
-            }
-        }
-    }
-
-    if tcm_candidates.len() == 1 {
-        return Some((tcm_candidates[0].clone(), format!("中药炮制前缀兼容 ({})", tcm_candidates[0].drug_name)));
-    } else if tcm_candidates.len() > 1 {
-        // 如果有多个炮制候选，优先比对规格
-        let mut spec_matched = Vec::new();
-        for c in &tcm_candidates {
-            let c_sp = clean_text(&c.spec);
-            if !c_sp.is_empty() && !clean_sp.is_empty() && (clean_sp == c_sp || clean_sp.contains(&c_sp) || c_sp.contains(&clean_sp)) {
-                spec_matched.push(*c);
-            }
-        }
-        if spec_matched.len() == 1 {
-            return Some((spec_matched[0].clone(), format!("中药炮制规格排他命中 ({})", spec_matched[0].drug_name)));
-        }
-    }
-
-    None
-}
-
-/// 匹配药品存货科目（兼容现有调用接口）
-pub fn match_drug(
-    drug_name: &str,
-    spec: &str,
-    factory: &str,
-    ledger: &[LedgerEntry],
-    config: &ConfigData,
-) -> Option<LedgerEntry> {
-    match_drug_with_method(drug_name, spec, factory, ledger, config).map(|(e, _)| e)
 }
 
 /// 执行生成销售出库凭证
@@ -362,53 +62,20 @@ pub fn generate_outbound_voucher(
     let ledger_entries = load_ledger_entries(ledger_p)?;
 
     // 2. 读取销售汇总表明细
-    let mut sales_wb = open_excel(sales_p)?;
-    let sheet_names = sales_wb.sheet_names();
-    let s_name = sheet_names
-        .iter()
-        .find(|s| s.contains("汇总") || s.contains("销售"))
-        .unwrap_or(&sheet_names[0]);
-
-    let range = sales_wb
-        .worksheet_range(s_name)
-        .map_err(|e| format!("读取销售表失败: {}", e))?;
-
-    let rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
+    let (_, rows) = read_sheet_rows(sales_p, &["汇总", "销售"], "销售表")?;
     if rows.len() < 2 {
         return Err("销售表中无有效数据".into());
     }
 
-    let mut h_idx = 0;
-    for (i, r) in rows.iter().take(10).enumerate() {
-        if find_col_idx(r, &["药品名称", "品名"]).is_some() {
-            h_idx = i;
-            break;
-        }
-    }
-
+    let h_idx = find_header_row(&rows, &["药品名称", "品名"], 10, "销售表")?;
     let header = &rows[h_idx];
-    let col_name = find_col_idx(header, &["药品名称", "品名"]).unwrap();
-    let col_spec = find_col_idx(header, &["规格"]).unwrap_or(col_name + 1);
-    let col_factory = find_col_idx(header, &["制药厂", "生产厂家", "厂家"]).unwrap_or(col_spec + 2);
-    let col_qty = find_col_idx(header, &["数量", "实发数量"]).unwrap_or(col_spec + 4);
-    let col_price = find_col_idx(header, &["进价", "成本单价", "销售进价"]).unwrap_or(col_qty + 1);
-    let col_date = find_col_idx(header, &["销售日期", "日期"]);
-
-    let mut source_dates = Vec::new();
-    if let Some(date_col) = col_date {
-        for row in rows.iter().skip(h_idx + 1) {
-            let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
-            if name.is_empty() || name.contains("合计") || name.contains("总计") {
-                continue;
-            }
-            if let Some(date_cell) = row.get(date_col) {
-                let date_value = cell_as_string(date_cell);
-                if !date_value.is_empty() {
-                    source_dates.push(date_value);
-                }
-            }
-        }
-    }
+    let col_name = required_col(header, &["药品名称", "品名"], "药品名称")?;
+    let col_spec = optional_col(header, &["规格"], col_name + 1);
+    let col_factory = optional_col(header, &["制药厂", "生产厂家", "厂家"], col_spec + 2);
+    let col_qty = optional_col(header, &["数量", "实发数量"], col_spec + 4);
+    let col_price = optional_col(header, &["进价", "成本单价", "销售进价"], col_qty + 1);
+    let col_date = crate::core::excel_utils::find_col_idx(header, &["销售日期", "日期"]);
+    let source_dates = collect_source_dates(&rows, h_idx + 1, col_name, col_date);
 
     // 凭证日期动态推断
     let voucher_date = crate::core::config::detect_voucher_date_with_source_dates(
@@ -418,82 +85,32 @@ pub fn generate_outbound_voucher(
     );
 
     // 读取原凭证模板中所有 Sheet 数据。
-    let mut tmpl_sheets = Vec::new();
-    let mut tmpl_wb = open_excel(tmpl_p)?;
-    for s in tmpl_wb.sheet_names() {
-        let range = tmpl_wb
-            .worksheet_range(&s)
-            .map_err(|e| format!("读取凭证模板工作表 '{}' 失败: {}", s, e))?;
-        let r_rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
-        tmpl_sheets.push((s.to_string(), r_rows));
-    }
+    let tmpl_sheets = load_template_sheets(tmpl_p)?;
 
     // 3. 开始使用 rust_xlsxwriter 构造凭证导入表
     let mut wb_out = Workbook::new();
     let ws_voucher = wb_out.add_worksheet();
     ws_voucher.set_name("凭证模版").map_err(|e| e.to_string())?;
 
-    // 样式定义
-    let fmt_header = Format::new()
-        .set_bold()
-        .set_font_size(10)
-        .set_align(rust_xlsxwriter::FormatAlign::Center)
-        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    let fmt_text = Format::new()
-        .set_font_size(10)
-        .set_align(rust_xlsxwriter::FormatAlign::Center)
-        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    let _fmt_left = Format::new()
-        .set_font_size(10)
-        .set_align(rust_xlsxwriter::FormatAlign::Left)
-        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    let fmt_money = Format::new()
-        .set_font_size(10)
-        .set_num_format("#,##0.00")
-        .set_align(rust_xlsxwriter::FormatAlign::Right)
-        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    let fmt_qty = Format::new()
-        .set_font_size(10)
-        .set_num_format("#,##0")
-        .set_align(rust_xlsxwriter::FormatAlign::Right)
-        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
-        .set_border(FormatBorder::Thin);
-
-    // 写入第 0 行标准表头 (26 列)
-    let template_headers = [
-        "日期", "凭证字", "凭证号", "附件数", "分录序号", "摘要", "科目代码", "科目名称",
-        "借方金额", "贷方金额", "客户", "供应商", "职员", "项目", "部门", "存货",
-        "是否限定", "自定义类别", "自定义编码", "自定义类别1", "自定义编码1", "数量",
-        "单价", "原币金额", "币别", "汇率",
-    ];
-
-    ws_voucher.set_row_height(0, 26).map_err(|e| e.to_string())?;
-    for (c, h) in template_headers.iter().enumerate() {
-        ws_voucher
-            .write_string_with_format(0, c as u16, *h, &fmt_header)
-            .map_err(|e| e.to_string())?;
-    }
+    let formats = VoucherFormats::new("#,##0");
+    write_voucher_headers(ws_voucher, &formats)?;
 
     // 第 1 行 (分录序号 1): 借方待填空行
-    ws_voucher.set_row_height(1, 20).map_err(|e| e.to_string())?;
-    ws_voucher.write_string_with_format(1, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
-    ws_voucher.write_string_with_format(1, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
-    ws_voucher.write_number_with_format(1, 4, 1.0, &fmt_text).map_err(|e| e.to_string())?;
-    ws_voucher.write_string_with_format(1, 24, "RMB", &fmt_text).map_err(|e| e.to_string())?;
-    ws_voucher.write_number_with_format(1, 25, 1.0, &fmt_text).map_err(|e| e.to_string())?;
-    for c in 0..26 {
-        if c != 0 && c != 1 && c != 4 && c != 24 && c != 25 {
-            ws_voucher.write_blank(1, c as u16, &fmt_text).map_err(|e| e.to_string())?;
-        }
-    }
+    let opening_line = VoucherLine {
+        date: &voucher_date,
+        voucher_no: None,
+        seq: 1,
+        summary: None,
+        subject_code: None,
+        debit_amount: None,
+        credit_amount: None,
+        supplier_code: None,
+        inventory_code: None,
+        qty: None,
+        price: None,
+        original_amount: None,
+    };
+    write_voucher_line(ws_voucher, 1, &opening_line, &formats)?;
 
     // 逐行匹配并填充贷方明细行 (分录序号从 2 递增)
     let mut matched_count = 0;
@@ -507,15 +124,15 @@ pub fn generate_outbound_voucher(
         if row.is_empty() {
             continue;
         }
-        let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
-        if name.is_empty() || name.contains("合计") || name.contains("总计") {
+        let name = row_as_string(row, col_name);
+        if is_summary_row(&name) {
             continue;
         }
 
-        let spec = row.get(col_spec).map(cell_as_string).unwrap_or_default();
-        let factory = row.get(col_factory).map(cell_as_string).unwrap_or_default();
-        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
-        let raw_price = row.get(col_price).map(cell_as_f64).unwrap_or(0.0);
+        let spec = row_as_string(row, col_spec);
+        let factory = row_as_string(row, col_factory);
+        let qty = row_as_f64(row, col_qty);
+        let raw_price = row_as_f64(row, col_price);
 
         total_qty += qty;
 
@@ -523,10 +140,20 @@ pub fn generate_outbound_voucher(
 
         let (aux_code, unit_price) = if let Some(m) = matched {
             matched_count += 1;
-            let p = if m.price > 0.0 { m.price } else if fallback_price { raw_price } else { 0.0 };
+            let p = if m.price > 0.0 {
+                m.price
+            } else if fallback_price {
+                raw_price
+            } else {
+                0.0
+            };
             (m.aux_code, p)
         } else {
-            let reason = if config.strict_vendor_suffix_drugs.iter().any(|d| clean_text(d) == clean_text(&name)) {
+            let reason = if config
+                .strict_vendor_suffix_drugs
+                .iter()
+                .any(|d| clean_text(d) == clean_text(&name))
+            {
                 "严格锁定厂家药品，总账中未找到匹配的厂家细分科目".to_string()
             } else {
                 "总账中未检索到匹配的存货科目编码".to_string()
@@ -552,103 +179,28 @@ pub fn generate_outbound_voucher(
         let credit_amt = (qty * unit_price * 100.0).round() / 100.0;
         total_credit_amt += credit_amt;
 
-        ws_voucher.set_row_height(current_row, 20).map_err(|e| e.to_string())?;
-
-        ws_voucher.write_string_with_format(current_row, 0, &voucher_date, &fmt_text).map_err(|e| e.to_string())?;
-        ws_voucher.write_string_with_format(current_row, 1, "记", &fmt_text).map_err(|e| e.to_string())?;
-        ws_voucher.write_blank(current_row, 2, &fmt_text).map_err(|e| e.to_string())?;
-        ws_voucher.write_blank(current_row, 3, &fmt_text).map_err(|e| e.to_string())?;
-        ws_voucher.write_number_with_format(current_row, 4, entry_seq as f64, &fmt_text).map_err(|e| e.to_string())?;
-
-        for c in 5..9 {
-            ws_voucher.write_blank(current_row, c as u16, &fmt_text).map_err(|e| e.to_string())?;
-        }
-
-        // 贷方金额
-        ws_voucher.write_number_with_format(current_row, 9, credit_amt, &fmt_money).map_err(|e| e.to_string())?;
-
-        for c in 10..15 {
-            ws_voucher.write_blank(current_row, c as u16, &fmt_text).map_err(|e| e.to_string())?;
-        }
-
-        // 存货代码
-        if !aux_code.is_empty() {
-            ws_voucher.write_string_with_format(current_row, 15, &aux_code, &fmt_text).map_err(|e| e.to_string())?;
-        } else {
-            ws_voucher.write_blank(current_row, 15, &fmt_text).map_err(|e| e.to_string())?;
-        }
-
-        for c in 16..21 {
-            ws_voucher.write_blank(current_row, c as u16, &fmt_text).map_err(|e| e.to_string())?;
-        }
-
-        // 数量、单价、原币金额
-        ws_voucher.write_number_with_format(current_row, 21, qty, &fmt_qty).map_err(|e| e.to_string())?;
-        ws_voucher.write_number_with_format(current_row, 22, unit_price, &fmt_money).map_err(|e| e.to_string())?;
-        ws_voucher.write_number_with_format(current_row, 23, credit_amt, &fmt_money).map_err(|e| e.to_string())?;
-        ws_voucher.write_string_with_format(current_row, 24, "RMB", &fmt_text).map_err(|e| e.to_string())?;
-        ws_voucher.write_number_with_format(current_row, 25, 1.0, &fmt_text).map_err(|e| e.to_string())?;
+        let line = VoucherLine {
+            date: &voucher_date,
+            voucher_no: None,
+            seq: entry_seq,
+            summary: None,
+            subject_code: None,
+            debit_amount: None,
+            credit_amount: Some(credit_amt),
+            supplier_code: None,
+            inventory_code: (!aux_code.is_empty()).then_some(aux_code.as_str()),
+            qty: Some(qty),
+            price: Some(unit_price),
+            original_amount: Some(credit_amt),
+        };
+        write_voucher_line(ws_voucher, current_row, &line, &formats)?;
 
         current_row += 1;
         entry_seq += 1;
     }
 
-    // 设置自适应列宽
-    for c in 0..26 {
-        ws_voucher.set_column_width(c, 13).map_err(|e| e.to_string())?;
-    }
-    ws_voucher.set_column_width(0, 14).map_err(|e| e.to_string())?;
-    ws_voucher.set_column_width(9, 15).map_err(|e| e.to_string())?;
-    ws_voucher.set_column_width(15, 14).map_err(|e| e.to_string())?;
-    ws_voucher.set_column_width(23, 15).map_err(|e| e.to_string())?;
-
-    // 复制原模板中的其他附表（例如“辅助核算”、“科目代码”等工作表）的单元格数据。
-    // 凭证主表由程序重新生成；rust_xlsxwriter 无法保留原工作簿的全部样式/合并/验证元数据。
-    for (s_name, s_rows) in tmpl_sheets {
-        if s_name.contains("凭证") || s_name.contains("模版") {
-            continue;
-        }
-        let ws_extra = wb_out.add_worksheet();
-        ws_extra.set_name(&s_name).map_err(|e| e.to_string())?;
-        for (r_idx, row) in s_rows.iter().enumerate() {
-            for (c_idx, cell) in row.iter().enumerate() {
-                match cell {
-                    calamine::Data::Float(f) => {
-                        ws_extra
-                            .write_number(r_idx as u32, c_idx as u16, *f)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    calamine::Data::Int(i) => {
-                        ws_extra
-                            .write_number(r_idx as u32, c_idx as u16, *i as f64)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    calamine::Data::String(s) => {
-                        ws_extra
-                            .write_string(r_idx as u32, c_idx as u16, s)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    calamine::Data::Bool(b) => {
-                        ws_extra
-                            .write_boolean(r_idx as u32, c_idx as u16, *b)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    calamine::Data::DateTime(_)
-                    | calamine::Data::DateTimeIso(_)
-                    | calamine::Data::DurationIso(_)
-                    | calamine::Data::Error(_) => {
-                        let value = cell_as_string(cell);
-                        if !value.is_empty() {
-                            ws_extra
-                                .write_string(r_idx as u32, c_idx as u16, &value)
-                                .map_err(|e| e.to_string())?;
-                        }
-                    }
-                    calamine::Data::Empty => {}
-                }
-            }
-        }
-    }
+    set_default_voucher_column_widths(ws_voucher, &[(0, 14.0), (9, 15.0), (15, 14.0), (23, 15.0)])?;
+    copy_template_sheets(&mut wb_out, &tmpl_sheets)?;
 
     // 确定输出路径
     let out_path_buf = if let Some(co) = custom_output {
@@ -767,14 +319,8 @@ mod tests {
         let config = ConfigData::default();
         let ledger = vec![ledger_entry("制吴茱萸", "1克*1000克/袋")];
 
-        let matched = match_drug(
-            "吴茱萸",
-            "1克*1000克/袋",
-            "",
-            &ledger,
-            &config,
-        )
-        .expect("库管通用名应能兼容匹配财务炮制前缀");
+        let matched = match_drug("吴茱萸", "1克*1000克/袋", "", &ledger, &config)
+            .expect("库管通用名应能兼容匹配财务炮制前缀");
 
         assert_eq!(matched.drug_name, "制吴茱萸");
     }

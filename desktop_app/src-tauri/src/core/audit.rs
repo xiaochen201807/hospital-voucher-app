@@ -1,8 +1,12 @@
 use crate::core::config::{clean_text, ConfigData};
-use crate::core::excel_utils::{cell_as_f64, cell_as_string, find_col_idx, open_excel};
-use crate::core::outbound::{match_drug_with_method, LedgerEntry};
-use calamine::Reader;
-use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
+use crate::core::excel_utils::{
+    amount_or_product, find_header_row, is_summary_row, optional_col, read_sheet_rows,
+    required_col, row_as_f64, row_as_string,
+};
+pub use crate::core::ledger::load_categorized_ledger;
+use crate::core::matching::match_drug_with_method;
+use crate::core::models::LedgerEntry;
+use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook, Worksheet};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -130,58 +134,54 @@ pub struct ConfirmedAuditMappingItem {
 
 /// 读取库管系统报表（西药、中药、耗材）
 fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
-    let mut wb = open_excel(path)?;
-    let sheet_name = wb
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| "库管报表中无工作表".to_string())?;
-
-    let range = wb
-        .worksheet_range(&sheet_name)
-        .map_err(|e| format!("读取库管报表失败: {}", e))?;
-
-    let rows: Vec<Vec<calamine::Data>> = range.rows().map(|r| r.to_vec()).collect();
+    let (_, rows) = read_sheet_rows(path, &[], "库管报表")?;
     if rows.len() < 2 {
         return Ok(Vec::new());
     }
 
-    let mut h_idx = 0;
-    for (i, r) in rows.iter().take(10).enumerate() {
-        if find_col_idx(r, &["药品名称", "品名", "材料名称", "名称", "耗材名称"]).is_some() {
-            h_idx = i;
-            break;
-        }
-    }
-
+    let h_idx = find_header_row(
+        &rows,
+        &["药品名称", "品名", "材料名称", "名称", "耗材名称"],
+        10,
+        "库管报表",
+    )?;
     let header = &rows[h_idx];
-    let col_name = find_col_idx(header, &["药品名称", "品名", "材料名称", "名称", "耗材名称"]).unwrap();
-    let col_spec = find_col_idx(header, &["规格"]).unwrap_or(col_name + 1);
-    let col_factory = find_col_idx(header, &["制药厂", "生产厂家", "厂家", "生产商"]).unwrap_or(col_spec + 1);
-    let col_unit = find_col_idx(header, &["单位"]).unwrap_or(col_factory + 1);
-    let col_qty = find_col_idx(header, &["数量", "结存数量", "在库数量", "库存数量"]).unwrap_or(col_unit + 1);
-    let col_price = find_col_idx(header, &["单价", "成本价", "结存单价"]).unwrap_or(col_qty + 1);
-    let col_amt = find_col_idx(header, &["金额", "结存金额", "成本金额"]).unwrap_or(col_price + 1);
+    let col_name = required_col(
+        header,
+        &["药品名称", "品名", "材料名称", "名称", "耗材名称"],
+        "药品/材料名称",
+    )?;
+    let col_spec = optional_col(header, &["规格"], col_name + 1);
+    let col_factory = optional_col(
+        header,
+        &["制药厂", "生产厂家", "厂家", "生产商"],
+        col_spec + 1,
+    );
+    let col_unit = optional_col(header, &["单位"], col_factory + 1);
+    let col_qty = optional_col(
+        header,
+        &["数量", "结存数量", "在库数量", "库存数量"],
+        col_unit + 1,
+    );
+    let col_price = optional_col(header, &["单价", "成本价", "结存单价"], col_qty + 1);
+    let col_amt = optional_col(header, &["金额", "结存金额", "成本金额"], col_price + 1);
 
     let mut items = Vec::new();
     for row in rows.iter().skip(h_idx + 1) {
         if row.is_empty() {
             continue;
         }
-        let name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
-        if name.is_empty() || name.contains("合计") || name.contains("总计") {
+        let name = row_as_string(row, col_name);
+        if is_summary_row(&name) {
             continue;
         }
 
-        let spec = row.get(col_spec).map(cell_as_string).unwrap_or_default();
-        let factory = row.get(col_factory).map(cell_as_string).unwrap_or_default();
-        let unit = row.get(col_unit).map(cell_as_string).unwrap_or_default();
-        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
-        let price = row.get(col_price).map(cell_as_f64).unwrap_or(0.0);
-        let mut amount = row.get(col_amt).map(cell_as_f64).unwrap_or(0.0);
-        if amount == 0.0 && qty > 0.0 && price > 0.0 {
-            amount = (qty * price * 100.0).round() / 100.0;
-        }
+        let spec = row_as_string(row, col_spec);
+        let factory = row_as_string(row, col_factory);
+        let unit = row_as_string(row, col_unit);
+        let qty = row_as_f64(row, col_qty);
+        let price = row_as_f64(row, col_price);
+        let amount = amount_or_product(row_as_f64(row, col_amt), qty, price);
 
         items.push(WarehouseItem {
             name,
@@ -195,75 +195,6 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
     }
 
     Ok(items)
-}
-
-/// 读取财务总账并按类别划分为西药、中药（含饮片ZY与颗粒KL）、耗材
-pub fn load_categorized_ledger(
-    ledger_p: &Path,
-) -> Result<(Vec<LedgerEntry>, Vec<LedgerEntry>, Vec<LedgerEntry>), String> {
-    let mut wb_ledger = open_excel(ledger_p)?;
-    let sheet_name = wb_ledger
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| "总账中无有效工作表".to_string())?;
-
-    let range = wb_ledger
-        .worksheet_range(&sheet_name)
-        .map_err(|e| format!("读取总账失败: {}", e))?;
-
-    let mut ledger_xy = Vec::new();
-    let mut ledger_zy = Vec::new();
-    let mut ledger_hc = Vec::new();
-
-    for row in range.rows() {
-        if row.len() < 4 {
-            continue;
-        }
-        let code = cell_as_string(&row[0]);
-        if !code.starts_with("1201_") {
-            continue;
-        }
-
-        let name_full = cell_as_string(&row[1]);
-        let aux_code = code.replace("1201_", "");
-        let raw_name = name_full.trim_start_matches("存货_").trim();
-        let parts: Vec<&str> = raw_name.splitn(2, ' ').collect();
-        let drug_name = parts[0].to_string();
-        let spec = if parts.len() > 1 { parts[1].to_string() } else { String::new() };
-
-        let end_qty = if row.len() > 16 { cell_as_f64(&row[16]) } else { 0.0 };
-        let end_price = if row.len() > 17 { cell_as_f64(&row[17]) } else { 0.0 };
-        let init_price = if row.len() > 5 { cell_as_f64(&row[5]) } else { 0.0 };
-        let price = if end_price > 0.0 {
-            end_price
-        } else if init_price > 0.0 {
-            init_price
-        } else {
-            0.0
-        };
-
-        let entry = LedgerEntry {
-            code: code.clone(),
-            aux_code,
-            name_full,
-            drug_name,
-            spec,
-            price,
-            end_qty,
-        };
-
-        if code.starts_with("1201_XY") {
-            ledger_xy.push(entry);
-        } else if code.starts_with("1201_ZY") || code.starts_with("1201_KL") {
-            // 中药房包含 1201_ZY (中药饮片) 和 1201_KL (中药配方颗粒)！
-            ledger_zy.push(entry);
-        } else if code.starts_with("1201_HC") {
-            ledger_hc.push(entry);
-        }
-    }
-
-    Ok((ledger_xy, ledger_zy, ledger_hc))
 }
 
 fn build_mapping_item(
@@ -311,49 +242,59 @@ fn build_mapping_item(
         }
     }
 
-    if let Some((m, method)) = matched_res {
-        let l_amt = (m.end_qty * m.price * 100.0).round() / 100.0;
-        AuditMappingItem {
-            id,
-            category: category.to_string(),
-            wh_name: w.name,
-            wh_spec: w.spec,
-            wh_factory: w.factory,
-            wh_unit: w.unit,
-            wh_qty: w.qty,
-            wh_price: w.price,
-            wh_amount: w.amount,
-            matched: true,
-            checked: true, // 自动识别后默认勾选上！
-            match_method: method,
-            ledger_code: m.code,
-            ledger_name: m.name_full,
-            ledger_qty: m.end_qty,
-            ledger_price: m.price,
-            ledger_amount: l_amt,
-            candidates: relevant_cands,
-        }
+    let (
+        matched,
+        checked,
+        match_method,
+        ledger_code,
+        ledger_name,
+        ledger_qty,
+        ledger_price,
+        ledger_amount,
+    ) = if let Some((entry, method)) = matched_res {
+        let ledger_amount = (entry.end_qty * entry.price * 100.0).round() / 100.0;
+        (
+            true,
+            true,
+            method,
+            entry.code,
+            entry.name_full,
+            entry.end_qty,
+            entry.price,
+            ledger_amount,
+        )
     } else {
-        AuditMappingItem {
-            id,
-            category: category.to_string(),
-            wh_name: w.name,
-            wh_spec: w.spec,
-            wh_factory: w.factory,
-            wh_unit: w.unit,
-            wh_qty: w.qty,
-            wh_price: w.price,
-            wh_amount: w.amount,
-            matched: false,
-            checked: false,
-            match_method: "未自动匹配".to_string(),
-            ledger_code: String::new(),
-            ledger_name: String::new(),
-            ledger_qty: 0.0,
-            ledger_price: 0.0,
-            ledger_amount: 0.0,
-            candidates: relevant_cands,
-        }
+        (
+            false,
+            false,
+            "未自动匹配".to_string(),
+            String::new(),
+            String::new(),
+            0.0,
+            0.0,
+            0.0,
+        )
+    };
+
+    AuditMappingItem {
+        id,
+        category: category.to_string(),
+        wh_name: w.name,
+        wh_spec: w.spec,
+        wh_factory: w.factory,
+        wh_unit: w.unit,
+        wh_qty: w.qty,
+        wh_price: w.price,
+        wh_amount: w.amount,
+        matched,
+        checked,
+        match_method,
+        ledger_code,
+        ledger_name,
+        ledger_qty,
+        ledger_price,
+        ledger_amount,
+        candidates: relevant_cands,
     }
 }
 
@@ -375,42 +316,29 @@ pub fn preview_inventory_audit_mapping(
     let mut all_items = Vec::new();
     let mut next_id = 1;
 
-    // 1. 西药房
-    if let Some(wp) = west_path {
-        let p = Path::new(wp);
-        if p.exists() {
-            let wh_items = load_warehouse_items(p)?;
-            for w in wh_items {
-                let item = build_mapping_item(next_id, "西药房", w, &ledger_xy, config);
-                next_id += 1;
-                all_items.push(item);
-            }
+    let warehouse_defs: [(&str, Option<&str>, &[LedgerEntry]); 3] = [
+        ("西药房", west_path, &ledger_xy),
+        ("中药房", tcm_path, &ledger_zy),
+        ("耗材库", hc_path, &ledger_hc),
+    ];
+    for (category, warehouse_path, ledger_entries) in warehouse_defs {
+        let Some(warehouse_path) = warehouse_path else {
+            continue;
+        };
+        let path = Path::new(warehouse_path);
+        if !path.exists() {
+            continue;
         }
-    }
 
-    // 2. 中药房（含 ZY 饮片 与 KL 配方颗粒）
-    if let Some(tp) = tcm_path {
-        let p = Path::new(tp);
-        if p.exists() {
-            let wh_items = load_warehouse_items(p)?;
-            for w in wh_items {
-                let item = build_mapping_item(next_id, "中药房", w, &ledger_zy, config);
-                next_id += 1;
-                all_items.push(item);
-            }
-        }
-    }
-
-    // 3. 耗材库
-    if let Some(hp) = hc_path {
-        let p = Path::new(hp);
-        if p.exists() {
-            let wh_items = load_warehouse_items(p)?;
-            for w in wh_items {
-                let item = build_mapping_item(next_id, "耗材库", w, &ledger_hc, config);
-                next_id += 1;
-                all_items.push(item);
-            }
+        for warehouse_item in load_warehouse_items(path)? {
+            all_items.push(build_mapping_item(
+                next_id,
+                category,
+                warehouse_item,
+                ledger_entries,
+                config,
+            ));
+            next_id += 1;
         }
     }
 
@@ -642,7 +570,8 @@ pub fn run_inventory_audit(
     custom_output: Option<&str>,
     config: &ConfigData,
 ) -> Result<OverallAuditResult, String> {
-    let preview = preview_inventory_audit_mapping(ledger_path, west_path, tcm_path, hc_path, config)?;
+    let preview =
+        preview_inventory_audit_mapping(ledger_path, west_path, tcm_path, hc_path, config)?;
     let confirmed: Vec<ConfirmedAuditMappingItem> = preview
         .items
         .into_iter()
@@ -662,6 +591,100 @@ pub fn run_inventory_audit(
         .collect();
 
     execute_inventory_audit_with_mapping(ledger_path, confirmed, custom_output, config)
+}
+
+const AUDIT_ITEM_HEADERS: [&str; 13] = [
+    "库房",
+    "核对状态",
+    "药品/材料名称",
+    "规格",
+    "生产厂家",
+    "单位",
+    "财务存货编码",
+    "财务结存数量",
+    "库管在库数量",
+    "数量差异",
+    "财务金额",
+    "库管金额",
+    "差异金额",
+];
+
+fn write_audit_item_headers(worksheet: &mut Worksheet, format: &Format) -> Result<(), String> {
+    for (col_idx, header) in AUDIT_ITEM_HEADERS.iter().enumerate() {
+        worksheet
+            .write_string_with_format(0, col_idx as u16, *header, format)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn write_audit_record_row(
+    worksheet: &mut Worksheet,
+    row: u32,
+    record: &AuditRecord,
+    center_format: &Format,
+    left_format: &Format,
+    qty_format: &Format,
+    money_format: &Format,
+) -> Result<(), String> {
+    worksheet
+        .write_string_with_format(row, 0, &record.category, center_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 1, &record.status_desc, center_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 2, &record.name, left_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 3, &record.spec, left_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 4, &record.factory, left_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 5, &record.unit, center_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_string_with_format(row, 6, &record.ledger_code, center_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 7, record.ledger_qty, qty_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 8, record.wh_qty, qty_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 9, record.diff_qty, qty_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 10, record.ledger_amt, money_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 11, record.wh_amt, money_format)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .write_number_with_format(row, 12, record.diff_amt, money_format)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn set_audit_item_column_widths(worksheet: &mut Worksheet) -> Result<(), String> {
+    for col in 0..13 {
+        worksheet
+            .set_column_width(col, 14)
+            .map_err(|e| e.to_string())?;
+    }
+    worksheet
+        .set_column_width(2, 24)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .set_column_width(3, 16)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .set_column_width(4, 20)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 输出标准 3-Sheet Excel 审计分析报告
@@ -721,27 +744,61 @@ fn generate_audit_report_excel(
 
     // Sheet 1: 看板总览
     let ws_dash = out_wb.add_worksheet();
-    ws_dash.set_name("各库房对账汇总看板").map_err(|e| e.to_string())?;
+    ws_dash
+        .set_name("各库房对账汇总看板")
+        .map_err(|e| e.to_string())?;
 
-    ws_dash.write_string_with_format(0, 0, "石家庄心理医院 - 账实库存核对看板", &fmt_title).map_err(|e| e.to_string())?;
+    ws_dash
+        .write_string_with_format(0, 0, "石家庄心理医院 - 账实库存核对看板", &fmt_title)
+        .map_err(|e| e.to_string())?;
 
     let dash_headers = [
-        "库别", "核对品规总数", "完全吻合项", "数量差异项", "仅财务有结存", "仅库管有在库", "账实吻合率", "涉及净差异金额(元)"
+        "库别",
+        "核对品规总数",
+        "完全吻合项",
+        "数量差异项",
+        "仅财务有结存",
+        "仅库管有在库",
+        "账实吻合率",
+        "涉及净差异金额(元)",
     ];
     for (c, h) in dash_headers.iter().enumerate() {
-        ws_dash.write_string_with_format(2, c as u16, *h, &fmt_header).map_err(|e| e.to_string())?;
+        ws_dash
+            .write_string_with_format(2, c as u16, *h, &fmt_header)
+            .map_err(|e| e.to_string())?;
     }
 
     for (idx, cat) in categories.iter().enumerate() {
         let row_d = (3 + idx) as u32;
-        ws_dash.write_string_with_format(row_d, 0, &cat.category, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 1, cat.summary.total_items as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 2, cat.summary.equal_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 3, cat.summary.diff_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 4, cat.summary.ledger_only_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 5, cat.summary.wh_only_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 6, cat.summary.match_rate / 100.0, &fmt_rate).map_err(|e| e.to_string())?;
-        ws_dash.write_number_with_format(row_d, 7, cat.summary.total_diff_amt, &fmt_money).map_err(|e| e.to_string())?;
+        ws_dash
+            .write_string_with_format(row_d, 0, &cat.category, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 1, cat.summary.total_items as f64, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 2, cat.summary.equal_count as f64, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 3, cat.summary.diff_count as f64, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(
+                row_d,
+                4,
+                cat.summary.ledger_only_count as f64,
+                &fmt_cell_center,
+            )
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 5, cat.summary.wh_only_count as f64, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 6, cat.summary.match_rate / 100.0, &fmt_rate)
+            .map_err(|e| e.to_string())?;
+        ws_dash
+            .write_number_with_format(row_d, 7, cat.summary.total_diff_amt, &fmt_money)
+            .map_err(|e| e.to_string())?;
     }
 
     for c in 0..8 {
@@ -750,16 +807,11 @@ fn generate_audit_report_excel(
 
     // Sheet 2: 差异重点排查清单
     let ws_diff = out_wb.add_worksheet();
-    ws_diff.set_name("差异重点排查清单").map_err(|e| e.to_string())?;
+    ws_diff
+        .set_name("差异重点排查清单")
+        .map_err(|e| e.to_string())?;
 
-    let item_headers = [
-        "库房", "核对状态", "药品/材料名称", "规格", "生产厂家", "单位", "财务存货编码",
-        "财务结存数量", "库管在库数量", "数量差异", "财务金额", "库管金额", "差异金额"
-    ];
-
-    for (c, h) in item_headers.iter().enumerate() {
-        ws_diff.write_string_with_format(0, c as u16, *h, &fmt_header).map_err(|e| e.to_string())?;
-    }
+    write_audit_item_headers(ws_diff, &fmt_header)?;
 
     let mut row_diff = 1;
     for cat in categories {
@@ -767,68 +819,48 @@ fn generate_audit_report_excel(
             if r.status == "EQUAL" {
                 continue;
             }
-            ws_diff.write_string_with_format(row_diff, 0, &r.category, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 1, &r.status_desc, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 2, &r.name, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 3, &r.spec, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 4, &r.factory, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 5, &r.unit, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_diff.write_string_with_format(row_diff, 6, &r.ledger_code, &fmt_cell_center).map_err(|e| e.to_string())?;
-
-            ws_diff.write_number_with_format(row_diff, 7, r.ledger_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_diff.write_number_with_format(row_diff, 8, r.wh_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_diff.write_number_with_format(row_diff, 9, r.diff_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_diff.write_number_with_format(row_diff, 10, r.ledger_amt, &fmt_money).map_err(|e| e.to_string())?;
-            ws_diff.write_number_with_format(row_diff, 11, r.wh_amt, &fmt_money).map_err(|e| e.to_string())?;
-            ws_diff.write_number_with_format(row_diff, 12, r.diff_amt, &fmt_money).map_err(|e| e.to_string())?;
+            write_audit_record_row(
+                ws_diff,
+                row_diff,
+                r,
+                &fmt_cell_center,
+                &fmt_cell_left,
+                &fmt_qty,
+                &fmt_money,
+            )?;
 
             row_diff += 1;
         }
     }
 
-    for c in 0..13 {
-        ws_diff.set_column_width(c, 14).map_err(|e| e.to_string())?;
-    }
-    ws_diff.set_column_width(2, 24).map_err(|e| e.to_string())?;
-    ws_diff.set_column_width(3, 16).map_err(|e| e.to_string())?;
-    ws_diff.set_column_width(4, 20).map_err(|e| e.to_string())?;
+    set_audit_item_column_widths(ws_diff)?;
 
     // Sheet 3: 全部品规对照底稿
     let ws_all = out_wb.add_worksheet();
-    ws_all.set_name("全部品规对照底稿").map_err(|e| e.to_string())?;
+    ws_all
+        .set_name("全部品规对照底稿")
+        .map_err(|e| e.to_string())?;
 
-    for (c, h) in item_headers.iter().enumerate() {
-        ws_all.write_string_with_format(0, c as u16, *h, &fmt_header).map_err(|e| e.to_string())?;
-    }
+    write_audit_item_headers(ws_all, &fmt_header)?;
 
     let mut row_all = 1;
     for cat in categories {
         for r in &cat.records {
-            ws_all.write_string_with_format(row_all, 0, &r.category, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 1, &r.status_desc, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 2, &r.name, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 3, &r.spec, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 4, &r.factory, &fmt_cell_left).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 5, &r.unit, &fmt_cell_center).map_err(|e| e.to_string())?;
-            ws_all.write_string_with_format(row_all, 6, &r.ledger_code, &fmt_cell_center).map_err(|e| e.to_string())?;
-
-            ws_all.write_number_with_format(row_all, 7, r.ledger_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_all.write_number_with_format(row_all, 8, r.wh_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_all.write_number_with_format(row_all, 9, r.diff_qty, &fmt_qty).map_err(|e| e.to_string())?;
-            ws_all.write_number_with_format(row_all, 10, r.ledger_amt, &fmt_money).map_err(|e| e.to_string())?;
-            ws_all.write_number_with_format(row_all, 11, r.wh_amt, &fmt_money).map_err(|e| e.to_string())?;
-            ws_all.write_number_with_format(row_all, 12, r.diff_amt, &fmt_money).map_err(|e| e.to_string())?;
+            write_audit_record_row(
+                ws_all,
+                row_all,
+                r,
+                &fmt_cell_center,
+                &fmt_cell_left,
+                &fmt_qty,
+                &fmt_money,
+            )?;
 
             row_all += 1;
         }
     }
 
-    for c in 0..13 {
-        ws_all.set_column_width(c, 14).map_err(|e| e.to_string())?;
-    }
-    ws_all.set_column_width(2, 24).map_err(|e| e.to_string())?;
-    ws_all.set_column_width(3, 16).map_err(|e| e.to_string())?;
-    ws_all.set_column_width(4, 20).map_err(|e| e.to_string())?;
+    set_audit_item_column_widths(ws_all)?;
 
     out_wb
         .save(out_path)

@@ -20,7 +20,24 @@ pub struct ConfigData {
 /// 清洗文本：去除所有空格、中英文括号、斜杠、星号、下划线、横杠并转小写
 pub fn clean_text(text: &str) -> String {
     text.chars()
-        .filter(|c| !matches!(*c, ' ' | '\t' | '\r' | '\n' | '(' | ')' | '（' | '）' | '-' | '*' | '/' | '_' | '—' | '　'))
+        .filter(|c| {
+            !matches!(
+                *c,
+                ' ' | '\t'
+                    | '\r'
+                    | '\n'
+                    | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '_'
+                    | '—'
+                    | '　'
+            )
+        })
         .collect::<String>()
         .to_lowercase()
 }
@@ -99,7 +116,11 @@ pub fn detect_voucher_date_with_source_dates(
         }
     }
 
-    if let Some(max_date) = source_dates.iter().filter_map(|value| parse_date_value(value)).max() {
+    if let Some(max_date) = source_dates
+        .iter()
+        .filter_map(|value| parse_date_value(value))
+        .max()
+    {
         return get_month_end_date_str(max_date.year(), max_date.month());
     }
 
@@ -191,7 +212,8 @@ pub fn save_config_to_file(data: &ConfigData, custom: Option<&str>) -> Result<Pa
 
 /// 将配置保存到指定路径，并自动创建用户配置目录。
 pub fn save_config_to_path(data: &ConfigData, path: &Path) -> Result<PathBuf, String> {
-    let json_str = serde_json::to_string_pretty(data).map_err(|e| format!("序列化 JSON 失败: {}", e))?;
+    let json_str =
+        serde_json::to_string_pretty(data).map_err(|e| format!("序列化 JSON 失败: {}", e))?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }

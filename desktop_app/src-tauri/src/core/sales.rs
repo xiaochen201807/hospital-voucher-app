@@ -1,5 +1,7 @@
-use crate::core::excel_utils::{cell_as_f64, cell_as_string, find_col_idx, open_excel};
-use calamine::Reader;
+use crate::core::excel_utils::{
+    cell_as_string, find_header_row, is_summary_row, optional_col, read_sheet_rows, required_col,
+    row_as_f64, row_as_string,
+};
 use rust_xlsxwriter::{Format, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -47,44 +49,33 @@ pub fn process_sales_file(
         return Err(format!("销售明细文件 '{:?}' 不存在", in_p));
     }
 
-    let mut workbook = open_excel(in_p)?;
-    let sheet_names = workbook.sheet_names();
-    if sheet_names.is_empty() {
-        return Err("Excel 文件中未发现任何工作表".into());
-    }
-
-    // 默认读取第 0 个原始 Sheet
-    let sheet0_name = sheet_names[0].clone();
-    let range0 = workbook
-        .worksheet_range(&sheet0_name)
-        .map_err(|e| format!("读取工作表 '{}' 失败: {}", sheet0_name, e))?;
-
-    let rows0: Vec<Vec<calamine::Data>> = range0.rows().map(|r| r.to_vec()).collect();
+    // 默认读取第 0 个原始 Sheet。
+    let (sheet0_name, rows0) = read_sheet_rows(in_p, &[], "销售明细")?;
     if rows0.len() < 2 {
         return Err("源数据行数过少，无有效明细数据".into());
     }
 
-    // 寻找表头所在行（包含“药品名称”或“品名”）
-    let mut header_idx = None;
-    for (i, row) in rows0.iter().take(10).enumerate() {
-        if find_col_idx(row, &["药品名称", "品名", "商品名称"]).is_some() {
-            header_idx = Some(i);
-            break;
-        }
-    }
-
-    let header_row_idx = header_idx.ok_or_else(|| "未能在前10行中找到包含'药品名称'的有效表头".to_string())?;
+    let header_row_idx =
+        find_header_row(&rows0, &["药品名称", "品名", "商品名称"], 10, "销售明细")?;
     let header = &rows0[header_row_idx];
 
-    let col_name = find_col_idx(header, &["药品名称", "品名", "商品名称"]).unwrap();
-    let col_spec = find_col_idx(header, &["规格"]).unwrap_or(col_name + 1);
-    let col_dosage = find_col_idx(header, &["剂型"]).unwrap_or(col_spec + 1);
-    let col_factory = find_col_idx(header, &["制药厂", "生产厂家", "厂家"]).unwrap_or(col_dosage + 1);
-    let col_unit = find_col_idx(header, &["单位"]).unwrap_or(col_factory + 1);
-    let col_qty = find_col_idx(header, &["数量", "实发数量", "发药数量", "销售数量"]).unwrap_or(col_unit + 1);
-    let col_cost_amt = find_col_idx(header, &["进价金额", "成本金额"]).unwrap_or(col_qty + 1);
-    let col_retail_amt = find_col_idx(header, &["零价金额", "零售金额", "售价金额"]).unwrap_or(col_cost_amt + 1);
-    let col_stock = find_col_idx(header, &["库存"]).unwrap_or(col_retail_amt + 1);
+    let col_name = required_col(header, &["药品名称", "品名", "商品名称"], "药品名称")?;
+    let col_spec = optional_col(header, &["规格"], col_name + 1);
+    let col_dosage = optional_col(header, &["剂型"], col_spec + 1);
+    let col_factory = optional_col(header, &["制药厂", "生产厂家", "厂家"], col_dosage + 1);
+    let col_unit = optional_col(header, &["单位"], col_factory + 1);
+    let col_qty = optional_col(
+        header,
+        &["数量", "实发数量", "发药数量", "销售数量"],
+        col_unit + 1,
+    );
+    let col_cost_amt = optional_col(header, &["进价金额", "成本金额"], col_qty + 1);
+    let col_retail_amt = optional_col(
+        header,
+        &["零价金额", "零售金额", "售价金额"],
+        col_cost_amt + 1,
+    );
+    let col_stock = optional_col(header, &["库存"], col_retail_amt + 1);
 
     // 以 (name, spec, dosage, factory) 4项元组为精确去重分组 Key
     let mut groups: BTreeMap<(String, String, String, String), DrugSaleItem> = BTreeMap::new();
@@ -97,36 +88,29 @@ pub fn process_sales_file(
         if row.is_empty() {
             continue;
         }
-        let raw_name = cell_as_string(row.get(col_name).unwrap_or(&calamine::Data::Empty));
-        if raw_name.is_empty() {
+        let raw_name = row_as_string(row, col_name);
+        // 捕捉原表可能已有的合计行
+        if !raw_name.is_empty() && is_summary_row(&raw_name) {
+            source_total_qty = Some(row_as_f64(row, col_qty));
+            source_total_cost = Some(row_as_f64(row, col_cost_amt));
+            source_total_retail = Some(row_as_f64(row, col_retail_amt));
             continue;
         }
-
-        // 捕捉原表可能已有的合计行
-        if raw_name.contains("合计") || raw_name.contains("总计") {
-            if let Some(c_qty) = row.get(col_qty) {
-                source_total_qty = Some(cell_as_f64(c_qty));
-            }
-            if let Some(c_cost) = row.get(col_cost_amt) {
-                source_total_cost = Some(cell_as_f64(c_cost));
-            }
-            if let Some(c_ret) = row.get(col_retail_amt) {
-                source_total_retail = Some(cell_as_f64(c_ret));
-            }
+        if raw_name.is_empty() {
             continue;
         }
 
         original_count += 1;
         let name = raw_name;
-        let spec = row.get(col_spec).map(cell_as_string).unwrap_or_default();
-        let dosage = row.get(col_dosage).map(cell_as_string).unwrap_or_default();
-        let factory = row.get(col_factory).map(cell_as_string).unwrap_or_default();
-        let unit = row.get(col_unit).map(cell_as_string).unwrap_or_default();
+        let spec = row_as_string(row, col_spec);
+        let dosage = row_as_string(row, col_dosage);
+        let factory = row_as_string(row, col_factory);
+        let unit = row_as_string(row, col_unit);
 
-        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
-        let cost_amt = row.get(col_cost_amt).map(cell_as_f64).unwrap_or(0.0);
-        let retail_amt = row.get(col_retail_amt).map(cell_as_f64).unwrap_or(0.0);
-        let stock = row.get(col_stock).map(cell_as_f64).unwrap_or(0.0);
+        let qty = row_as_f64(row, col_qty);
+        let cost_amt = row_as_f64(row, col_cost_amt);
+        let retail_amt = row_as_f64(row, col_retail_amt);
+        let stock = row_as_f64(row, col_stock);
 
         let key = (name.clone(), spec.clone(), dosage.clone(), factory.clone());
         groups
@@ -194,12 +178,18 @@ pub fn process_sales_file(
             PathBuf::from(co)
         } else {
             let parent = in_p.parent().unwrap_or_else(|| Path::new("."));
-            let stem = in_p.file_stem().and_then(|s| s.to_str()).unwrap_or("销售表");
+            let stem = in_p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("销售表");
             parent.join(format!("{}_已汇总.xlsx", stem))
         }
     } else {
         let parent = in_p.parent().unwrap_or_else(|| Path::new("."));
-        let stem = in_p.file_stem().and_then(|s| s.to_str()).unwrap_or("销售表");
+        let stem = in_p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("销售表");
         parent.join(format!("{}_已汇总.xlsx", stem))
     };
 
@@ -226,7 +216,9 @@ pub fn process_sales_file(
     // Sheet 2: 汇总去重后的【销售明细】Sheet
     // ----------------------------------------------------
     let ws_summary = out_wb.add_worksheet();
-    ws_summary.set_name(&target_sheet_name).map_err(|e| e.to_string())?;
+    ws_summary
+        .set_name(&target_sheet_name)
+        .map_err(|e| e.to_string())?;
 
     let fmt_title = Format::new()
         .set_bold()
@@ -281,19 +273,35 @@ pub fn process_sales_file(
         format!("{}销售明细表", sheet0_name)
     };
 
-    ws_summary.set_row_height(0, 32).map_err(|e| e.to_string())?;
+    ws_summary
+        .set_row_height(0, 32)
+        .map_err(|e| e.to_string())?;
     ws_summary
         .merge_range(0, 0, 0, 8, &title_text, &fmt_title)
         .map_err(|e| e.to_string())?;
 
     // 2. 表头行 (Row 1)
     let target_headers = [
-        "药品名称", "规格", "剂型", "制药厂", "单位", "数量", "进价金额", "零价金额", "库存",
+        "药品名称",
+        "规格",
+        "剂型",
+        "制药厂",
+        "单位",
+        "数量",
+        "进价金额",
+        "零价金额",
+        "库存",
     ];
 
-    ws_summary.set_row_height(1, 24).map_err(|e| e.to_string())?;
+    ws_summary
+        .set_row_height(1, 24)
+        .map_err(|e| e.to_string())?;
     for (col_idx, h) in target_headers.iter().enumerate() {
-        let fmt = if col_idx == 0 { &fmt_header_left } else { &fmt_header_center };
+        let fmt = if col_idx == 0 {
+            &fmt_header_left
+        } else {
+            &fmt_header_center
+        };
         ws_summary
             .write_string_with_format(1, col_idx as u16, *h, fmt)
             .map_err(|e| e.to_string())?;
@@ -302,44 +310,107 @@ pub fn process_sales_file(
     // 3. 数据行 (Row 2 .. N+1)
     let mut current_row: u32 = 2;
     for item in &sorted_records {
-        ws_summary.set_row_height(current_row, 20).map_err(|e| e.to_string())?;
+        ws_summary
+            .set_row_height(current_row, 20)
+            .map_err(|e| e.to_string())?;
 
-        ws_summary.write_string_with_format(current_row, 0, &item.name, &fmt_cell_left).map_err(|e| e.to_string())?;
-        ws_summary.write_string_with_format(current_row, 1, &item.spec, &fmt_cell_left).map_err(|e| e.to_string())?;
-        ws_summary.write_string_with_format(current_row, 2, &item.dosage, &fmt_cell_center).map_err(|e| e.to_string())?;
-        ws_summary.write_string_with_format(current_row, 3, &item.factory, &fmt_cell_left).map_err(|e| e.to_string())?;
-        ws_summary.write_string_with_format(current_row, 4, &item.unit, &fmt_cell_center).map_err(|e| e.to_string())?;
+        ws_summary
+            .write_string_with_format(current_row, 0, &item.name, &fmt_cell_left)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_string_with_format(current_row, 1, &item.spec, &fmt_cell_left)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_string_with_format(current_row, 2, &item.dosage, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_string_with_format(current_row, 3, &item.factory, &fmt_cell_left)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_string_with_format(current_row, 4, &item.unit, &fmt_cell_center)
+            .map_err(|e| e.to_string())?;
 
-        ws_summary.write_number_with_format(current_row, 5, item.qty, &fmt_cell_qty).map_err(|e| e.to_string())?;
-        ws_summary.write_number_with_format(current_row, 6, item.cost_amt, &fmt_cell_money).map_err(|e| e.to_string())?;
-        ws_summary.write_number_with_format(current_row, 7, item.retail_amt, &fmt_cell_money).map_err(|e| e.to_string())?;
-        ws_summary.write_number_with_format(current_row, 8, item.stock, &fmt_cell_qty).map_err(|e| e.to_string())?;
+        ws_summary
+            .write_number_with_format(current_row, 5, item.qty, &fmt_cell_qty)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_number_with_format(current_row, 6, item.cost_amt, &fmt_cell_money)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_number_with_format(current_row, 7, item.retail_amt, &fmt_cell_money)
+            .map_err(|e| e.to_string())?;
+        ws_summary
+            .write_number_with_format(current_row, 8, item.stock, &fmt_cell_qty)
+            .map_err(|e| e.to_string())?;
 
         current_row += 1;
     }
 
     // 4. 合计行 (Row N+2)
-    ws_summary.set_row_height(current_row, 22).map_err(|e| e.to_string())?;
-    ws_summary.write_string_with_format(current_row, 0, "合计", &fmt_header_left).map_err(|e| e.to_string())?;
-    ws_summary.write_blank(current_row, 1, &fmt_cell_left).map_err(|e| e.to_string())?;
-    ws_summary.write_blank(current_row, 2, &fmt_cell_center).map_err(|e| e.to_string())?;
-    ws_summary.write_number_with_format(current_row, 3, totals.original_count as f64, &fmt_cell_center).map_err(|e| e.to_string())?;
-    ws_summary.write_string_with_format(current_row, 4, "条", &fmt_cell_center).map_err(|e| e.to_string())?;
-    ws_summary.write_number_with_format(current_row, 5, totals.total_qty, &fmt_cell_qty).map_err(|e| e.to_string())?;
-    ws_summary.write_number_with_format(current_row, 6, totals.total_in_amt, &fmt_cell_money).map_err(|e| e.to_string())?;
-    ws_summary.write_number_with_format(current_row, 7, totals.total_retail_amt, &fmt_cell_money).map_err(|e| e.to_string())?;
-    ws_summary.write_blank(current_row, 8, &fmt_cell_center).map_err(|e| e.to_string())?;
+    ws_summary
+        .set_row_height(current_row, 22)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_string_with_format(current_row, 0, "合计", &fmt_header_left)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_blank(current_row, 1, &fmt_cell_left)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_blank(current_row, 2, &fmt_cell_center)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_number_with_format(
+            current_row,
+            3,
+            totals.original_count as f64,
+            &fmt_cell_center,
+        )
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_string_with_format(current_row, 4, "条", &fmt_cell_center)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_number_with_format(current_row, 5, totals.total_qty, &fmt_cell_qty)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_number_with_format(current_row, 6, totals.total_in_amt, &fmt_cell_money)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_number_with_format(current_row, 7, totals.total_retail_amt, &fmt_cell_money)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .write_blank(current_row, 8, &fmt_cell_center)
+        .map_err(|e| e.to_string())?;
 
     // 列宽设置
-    ws_summary.set_column_width(0, 26).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(1, 16).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(2, 10).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(3, 26).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(4, 8).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(5, 12).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(6, 16).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(7, 16).map_err(|e| e.to_string())?;
-    ws_summary.set_column_width(8, 12).map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(0, 26)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(1, 16)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(2, 10)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(3, 26)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(4, 8)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(5, 12)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(6, 16)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(7, 16)
+        .map_err(|e| e.to_string())?;
+    ws_summary
+        .set_column_width(8, 12)
+        .map_err(|e| e.to_string())?;
 
     // 保存文件
     out_wb

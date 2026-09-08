@@ -169,6 +169,39 @@ function setupDropzone(inputEl, wrapperEl) {
   });
 }
 
+function bindFilePicker(buttonId, inputEl, title) {
+  const button = document.getElementById(buttonId);
+  if (!button || !inputEl) return;
+
+  button.onclick = async () => {
+    const file = await pickExcelFile(title);
+    if (file) inputEl.value = file;
+  };
+}
+
+async function invokeWithLoading(command, args, options = {}) {
+  const {
+    loadingMessage = '正在处理中，请稍候...',
+    errorPrefix = '执行失败',
+    errorDuration = 5000
+  } = options;
+
+  showLoading(loadingMessage);
+  try {
+    const result = await invoke(command, args);
+    hideLoading();
+    if (!result || !result.success) {
+      showToast(`${errorPrefix}: ${result?.error || '未知错误'}`, 'error', errorDuration);
+      return null;
+    }
+    return result;
+  } catch (err) {
+    hideLoading();
+    showToast(`执行异常: ${err}`, 'error');
+    return null;
+  }
+}
+
 // 打开系统文件与所在文件夹
 async function openSystemPath(path) {
   if (!path) return;
@@ -338,16 +371,12 @@ function applyScannedFileToActiveTab(item) {
 // 3. TAB 1: 销售汇总处理
 // ----------------------------------------------------
 function initTabSales() {
-  const btnBrowse = document.getElementById('btn-browse-sales');
   const inputSales = document.getElementById('sales-input-file');
   const btnRun = document.getElementById('btn-run-sales');
   const inputSheet = document.getElementById('sales-sheet-name');
   const inputOutput = document.getElementById('sales-output-name');
 
-  btnBrowse.onclick = async () => {
-    const file = await pickExcelFile('选择原始销售明细表');
-    if (file) inputSales.value = file;
-  };
+  bindFilePicker('btn-browse-sales', inputSales, '选择原始销售明细表');
 
   setupDropzone(inputSales, inputSales.closest('.file-input-wrapper'));
 
@@ -361,33 +390,25 @@ function initTabSales() {
     const sheetName = inputSheet.value.trim() || null;
     const output = inputOutput.value.trim() || null;
 
-    showLoading('正在对销售明细进行去重、合并及多维度汇总计算...');
-    try {
-      const res = await invoke('execute_sales_process', {
-        file,
-        output,
-        sheetName,
-        sheet_name: sheetName
-      });
+    const res = await invokeWithLoading('execute_sales_process', {
+      file,
+      output,
+      sheetName,
+      sheet_name: sheetName
+    }, {
+      loadingMessage: '正在对销售明细进行去重、合并及多维度汇总计算...',
+      errorPrefix: '销售汇总失败'
+    });
+    if (!res) return;
 
-      hideLoading();
-      if (!res || !res.success) {
-        showToast(`销售汇总失败: ${res?.error || '未知错误'}`, 'error', 5000);
-        return;
-      }
+    state.lastOutputs.sales = res.output_file;
+    renderSalesResult(res);
+    showToast('销售明细汇总处理完成！', 'success');
 
-      state.lastOutputs.sales = res.output_file;
-      renderSalesResult(res);
-      showToast('销售明细汇总处理完成！', 'success');
-
-      // 智能联动：如果出库凭证面板的销售表为空，自动同步带入新汇总的文件
-      const obSales = document.getElementById('outbound-sales-file');
-      if (obSales && !obSales.value) {
-        obSales.value = res.output_file;
-      }
-    } catch (err) {
-      hideLoading();
-      showToast(`执行异常: ${err}`, 'error');
+    // 智能联动：如果出库凭证面板的销售表为空，自动同步带入新汇总的文件
+    const obSales = document.getElementById('outbound-sales-file');
+    if (obSales && !obSales.value) {
+      obSales.value = res.output_file;
     }
   };
 
@@ -428,18 +449,9 @@ function initTabOutbound() {
   const chkFallback = document.getElementById('outbound-fallback-price');
   const btnRun = document.getElementById('btn-run-outbound');
 
-  document.getElementById('btn-browse-outbound-sales').onclick = async () => {
-    const file = await pickExcelFile('选择销售汇总表');
-    if (file) inSales.value = file;
-  };
-  document.getElementById('btn-browse-outbound-ledger').onclick = async () => {
-    const file = await pickExcelFile('选择数量金额总账表');
-    if (file) inLedger.value = file;
-  };
-  document.getElementById('btn-browse-outbound-template').onclick = async () => {
-    const file = await pickExcelFile('选择凭证导入模板');
-    if (file) inTemplate.value = file;
-  };
+  bindFilePicker('btn-browse-outbound-sales', inSales, '选择销售汇总表');
+  bindFilePicker('btn-browse-outbound-ledger', inLedger, '选择数量金额总账表');
+  bindFilePicker('btn-browse-outbound-template', inTemplate, '选择凭证导入模板');
 
   setupDropzone(inSales, inSales.closest('.file-input-wrapper'));
   setupDropzone(inLedger, inLedger.closest('.file-input-wrapper'));
@@ -457,31 +469,24 @@ function initTabOutbound() {
     const dateVal = inDate.value.trim() || null;
     const fallback = chkFallback.checked;
 
-    showLoading('正在匹配总账存货编码与单价，生成销售出库凭证...');
-    try {
-      const res = await invoke('execute_outbound_voucher', {
-        sales,
-        ledger,
-        template,
-        output: null,
-        date: dateVal,
-        fallbackPrice: fallback,
-        config: null
-      });
+    const res = await invokeWithLoading('execute_outbound_voucher', {
+      sales,
+      ledger,
+      template,
+      output: null,
+      date: dateVal,
+      fallbackPrice: fallback,
+      config: null
+    }, {
+      loadingMessage: '正在匹配总账存货编码与单价，生成销售出库凭证...',
+      errorPrefix: '生成出库凭证失败',
+      errorDuration: 6000
+    });
+    if (!res) return;
 
-      hideLoading();
-      if (!res || !res.success) {
-        showToast(`生成出库凭证失败: ${res?.error || '未知错误'}`, 'error', 6000);
-        return;
-      }
-
-      state.lastOutputs.outbound = res.output_file;
-      renderOutboundResult(res);
-      showToast('销售出库凭证生成成功！', 'success');
-    } catch (err) {
-      hideLoading();
-      showToast(`执行异常: ${err}`, 'error');
-    }
+    state.lastOutputs.outbound = res.output_file;
+    renderOutboundResult(res);
+    showToast('销售出库凭证生成成功！', 'success');
   };
 
   document.getElementById('btn-open-outbound-file').onclick = () => {
@@ -644,18 +649,9 @@ function initTabInbound() {
   const inDate = document.getElementById('inbound-date');
   const btnRun = document.getElementById('btn-run-inbound');
 
-  document.getElementById('btn-browse-inbound').onclick = async () => {
-    const file = await pickExcelFile('选择药品入库单 (西药或中药)');
-    if (file) inInbound.value = file;
-  };
-  document.getElementById('btn-browse-inbound-ledger').onclick = async () => {
-    const file = await pickExcelFile('选择数量金额总账表');
-    if (file) inLedger.value = file;
-  };
-  document.getElementById('btn-browse-inbound-template').onclick = async () => {
-    const file = await pickExcelFile('选择凭证导入模板');
-    if (file) inTemplate.value = file;
-  };
+  bindFilePicker('btn-browse-inbound', inInbound, '选择药品入库单 (西药或中药)');
+  bindFilePicker('btn-browse-inbound-ledger', inLedger, '选择数量金额总账表');
+  bindFilePicker('btn-browse-inbound-template', inTemplate, '选择凭证导入模板');
 
   setupDropzone(inInbound, inInbound.closest('.file-input-wrapper'));
   setupDropzone(inLedger, inLedger.closest('.file-input-wrapper'));
@@ -673,31 +669,24 @@ function initTabInbound() {
     const voucherNo = inVoucherNo.value.trim() || null;
     const dateVal = inDate.value.trim() || null;
 
-    showLoading('正在解析入库单据、匹配供应商与存货编码并进行借贷平衡审计...');
-    try {
-      const res = await invoke('execute_inbound_voucher', {
-        inbound,
-        ledger,
-        template,
-        output: null,
-        date: dateVal,
-        voucherNo,
-        config: null
-      });
+    const res = await invokeWithLoading('execute_inbound_voucher', {
+      inbound,
+      ledger,
+      template,
+      output: null,
+      date: dateVal,
+      voucherNo,
+      config: null
+    }, {
+      loadingMessage: '正在解析入库单据、匹配供应商与存货编码并进行借贷平衡审计...',
+      errorPrefix: '生成入库凭证失败',
+      errorDuration: 6000
+    });
+    if (!res) return;
 
-      hideLoading();
-      if (!res || !res.success) {
-        showToast(`生成入库凭证失败: ${res?.error || '未知错误'}`, 'error', 6000);
-        return;
-      }
-
-      state.lastOutputs.inbound = res.output_file;
-      renderInboundResult(res);
-      showToast('药房入库凭证生成成功！', 'success');
-    } catch (err) {
-      hideLoading();
-      showToast(`执行异常: ${err}`, 'error');
-    }
+    state.lastOutputs.inbound = res.output_file;
+    renderInboundResult(res);
+    showToast('药房入库凭证生成成功！', 'success');
   };
 
   document.getElementById('btn-open-inbound-file').onclick = () => {
@@ -993,54 +982,24 @@ function initTabConfig() {
 // 7. TAB 4: 账实库存智能核对 (compare_inventory)
 // ----------------------------------------------------
 function initTabCompare() {
-  const btnBrowseLedger = document.getElementById('btn-browse-compare-ledger');
   const inputLedger = document.getElementById('compare-ledger-file');
 
-  const btnBrowseWest = document.getElementById('btn-browse-compare-west');
   const inputWest = document.getElementById('compare-west-file');
 
-  const btnBrowseTcm = document.getElementById('btn-browse-compare-tcm');
   const inputTcm = document.getElementById('compare-tcm-file');
 
-  const btnBrowseHc = document.getElementById('btn-browse-compare-hc');
   const inputHc = document.getElementById('compare-hc-file');
 
-  const btnBrowseOut = document.getElementById('btn-browse-compare-output');
   const inputOut = document.getElementById('compare-output-file');
 
   const btnRun = document.getElementById('btn-run-compare');
 
   // 文件浏览
-  if (btnBrowseLedger) {
-    btnBrowseLedger.onclick = async () => {
-      const f = await pickExcelFile('选择财务系统数量金额总账 (.xlsx)');
-      if (f) inputLedger.value = f;
-    };
-  }
-  if (btnBrowseWest) {
-    btnBrowseWest.onclick = async () => {
-      const f = await pickExcelFile('选择库管系统西药房库存汇总报表 (.xls / .xlsx)');
-      if (f) inputWest.value = f;
-    };
-  }
-  if (btnBrowseTcm) {
-    btnBrowseTcm.onclick = async () => {
-      const f = await pickExcelFile('选择库管系统中药房库存汇总报表 (.xls / .xlsx)');
-      if (f) inputTcm.value = f;
-    };
-  }
-  if (btnBrowseHc) {
-    btnBrowseHc.onclick = async () => {
-      const f = await pickExcelFile('选择库管系统耗材库库存汇总报表 (.xls / .xlsx)');
-      if (f) inputHc.value = f;
-    };
-  }
-  if (btnBrowseOut) {
-    btnBrowseOut.onclick = async () => {
-      const f = await pickExcelFile('选择或指定对账分析报告保存路径');
-      if (f) inputOut.value = f;
-    };
-  }
+  bindFilePicker('btn-browse-compare-ledger', inputLedger, '选择财务系统数量金额总账 (.xlsx)');
+  bindFilePicker('btn-browse-compare-west', inputWest, '选择库管系统西药房库存汇总报表 (.xls / .xlsx)');
+  bindFilePicker('btn-browse-compare-tcm', inputTcm, '选择库管系统中药房库存汇总报表 (.xls / .xlsx)');
+  bindFilePicker('btn-browse-compare-hc', inputHc, '选择库管系统耗材库库存汇总报表 (.xls / .xlsx)');
+  bindFilePicker('btn-browse-compare-output', inputOut, '选择或指定对账分析报告保存路径');
 
   // 拖拽支持
   [inputLedger, inputWest, inputTcm, inputHc].forEach(input => {
@@ -1066,38 +1025,29 @@ function initTabCompare() {
         return;
       }
 
-      showLoading('正在运用增强智能算法匹配多库在库品规与财务存货科目...');
+      const res = await invokeWithLoading('preview_inventory_audit_mapping', {
+        ledger,
+        west: west || null,
+        tcm: tcm || null,
+        hc: hc || null,
+        config: null
+      }, {
+        loadingMessage: '正在运用增强智能算法匹配多库在库品规与财务存货科目...',
+        errorPrefix: '智能识别失败'
+      });
+      if (!res) return;
 
-      try {
-        const res = await invoke('preview_inventory_audit_mapping', {
-          ledger,
-          west: west || null,
-          tcm: tcm || null,
-          hc: hc || null,
-          config: null
-        });
+      state.auditPreview = res;
+      renderComparePreviewDashboard(res);
+      renderComparePreviewTable();
 
-        hideLoading();
-
-        if (res && res.success) {
-          state.auditPreview = res;
-          renderComparePreviewDashboard(res);
-          renderComparePreviewTable();
-
-          const previewCard = document.getElementById('compare-preview-card');
-          if (previewCard) {
-            previewCard.classList.remove('hidden');
-            previewCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          }
-
-          showToast(`智能识别完成：共 ${res.total_wh_items} 个品规，已自动匹配 ${res.matched_count} 个（${res.match_rate}%），识别项已默认自动勾选！`, 'success');
-        } else {
-          showToast(`智能识别失败: ${res?.error || '未知错误'}`, 'error');
-        }
-      } catch (err) {
-        hideLoading();
-        showToast(`智能识别异常: ${err}`, 'error');
+      const previewCard = document.getElementById('compare-preview-card');
+      if (previewCard) {
+        previewCard.classList.remove('hidden');
+        previewCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
+
+      showToast(`智能识别完成：共 ${res.total_wh_items} 个品规，已自动匹配 ${res.matched_count} 个（${res.match_rate}%），识别项已默认自动勾选！`, 'success');
     };
   }
 
@@ -1133,39 +1083,30 @@ function initTabCompare() {
         return;
       }
 
-      showLoading(`正在依据确认的 ${checkedCount} 项映射关系执行账实对账，并生成分析报告...`);
+      const res = await invokeWithLoading('execute_inventory_audit_with_mapping', {
+        ledger,
+        confirmedItems: confirmedItems,
+        output: output || null,
+        config: null
+      }, {
+        loadingMessage: `正在依据确认的 ${checkedCount} 项映射关系执行账实对账，并生成分析报告...`,
+        errorPrefix: '核对生成失败'
+      });
+      if (!res) return;
 
-      try {
-        const res = await invoke('execute_inventory_audit_with_mapping', {
-          ledger,
-          confirmed_items: confirmedItems,
-          output: output || null,
-          config: null
-        });
+      state.auditData = res;
+      state.lastOutputs.compare = res.output_file;
 
-        hideLoading();
+      renderCompareDashboard(res);
+      renderCompareTable();
 
-        if (res && res.success) {
-          state.auditData = res;
-          state.lastOutputs.compare = res.output_file;
-
-          renderCompareDashboard(res);
-          renderCompareTable();
-
-          const resultCard = document.getElementById('compare-result-card');
-          if (resultCard) {
-            resultCard.classList.remove('hidden');
-            resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          }
-
-          showToast('账实库存核对分析报告生成成功！', 'success');
-        } else {
-          showToast(`核对生成失败: ${res?.error || '未知错误'}`, 'error');
-        }
-      } catch (err) {
-        hideLoading();
-        showToast(`核对生成异常: ${err}`, 'error');
+      const resultCard = document.getElementById('compare-result-card');
+      if (resultCard) {
+        resultCard.classList.remove('hidden');
+        resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
+
+      showToast('账实库存核对分析报告生成成功！', 'success');
     };
   }
 
