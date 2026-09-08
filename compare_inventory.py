@@ -141,15 +141,43 @@ def load_warehouse_inventory(file_path):
     if ext == '.xls':
         if xlrd is None:
             raise ImportError("读取 .xls 文件需安装 xlrd 模块")
-        rb = xlrd.open_workbook(file_path)
-        s0 = rb.sheet_by_index(0)
-        for r in range(s0.nrows):
-            raw_rows.append([s0.cell_value(r, c) for c in range(s0.ncols)])
+        try:
+            rb = xlrd.open_workbook(file_path)
+            s0 = rb.sheet_by_index(0)
+            for r in range(s0.nrows):
+                raw_rows.append([s0.cell_value(r, c) for c in range(s0.ncols)])
+        except Exception as e:
+            # 探测是否为 xlsx 改名或 HTML 伪报表
+            with open(file_path, 'rb') as f:
+                head = f.read(512)
+            if head.startswith(b'PK\x03\x04'):
+                wb = openpyxl.load_workbook(file_path, data_only=True)
+                ws = wb.active
+                for row in ws.iter_rows(values_only=True):
+                    raw_rows.append(list(row))
+            elif b'<html' in head.lower() or b'<table' in head.lower() or b'<?xml' in head.lower():
+                raise ValueError(f"文件 '{file_path}' 疑似为医院系统导出的 HTML/XML 网页伪表格，并非标准 Excel 二进制文件。\n【解决方法】：请用 WPS 或 Microsoft Excel 打开该报表，点击【文件】->【另存为】，选择【Excel 工作簿 (*.xlsx)】保存后再导入！") from e
+            else:
+                raise ValueError(f"打开 Excel 文件 '{file_path}' 失败: {e}\n提示：请先用 WPS 或 Excel 打开并“另存为”标准 .xlsx 格式后再导入。") from e
     elif ext == '.xlsx':
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb.active
-        for row in ws.iter_rows(values_only=True):
-            raw_rows.append(list(row))
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            ws = wb.active
+            for row in ws.iter_rows(values_only=True):
+                raw_rows.append(list(row))
+        except Exception as e:
+            if xlrd is not None:
+                with open(file_path, 'rb') as f:
+                    head = f.read(8)
+                if head.startswith(b'\xD0\xCF\x11\xE0'):
+                    rb = xlrd.open_workbook(file_path)
+                    s0 = rb.sheet_by_index(0)
+                    for r in range(s0.nrows):
+                        raw_rows.append([s0.cell_value(r, c) for c in range(s0.ncols)])
+                else:
+                    raise
+            else:
+                raise
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 
