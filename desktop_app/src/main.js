@@ -1456,12 +1456,14 @@ function renderExtInboundResult(data) {
 
   const unmatchedCard = document.getElementById('card-ext-unmatched');
   const unmatchedVal = document.getElementById('stat-ext-unmatched');
-  if (data.unmatched_count === 0) {
+  const unmatchedSupplierList = data.unmatched_suppliers || [];
+  const unmatchedSupplierCount = data.unmatched_supplier_count ?? unmatchedSupplierList.length;
+  if (data.unmatched_count === 0 && unmatchedSupplierCount === 0) {
     unmatchedCard.className = 'stat-card';
     unmatchedVal.innerHTML = '<span style="color:#10b981;">0 (全部命中)</span>';
   } else {
     unmatchedCard.className = 'stat-card warning';
-    unmatchedVal.innerHTML = `<span style="color:#f59e0b;">${data.unmatched_count} 笔 (标黄)</span>`;
+    unmatchedVal.innerHTML = `<span style="color:#f59e0b;">存货 ${data.unmatched_count} / 供应商 ${unmatchedSupplierCount}</span>`;
   }
 
   // 未匹配清单
@@ -1486,6 +1488,24 @@ function renderExtInboundResult(data) {
     });
   } else {
     unmatchedBox.classList.add('hidden');
+  }
+
+  // 未匹配供应商清单：供应商编码为空会影响 2202 贷方辅助核算，必须单独提示。
+  const unmatchedSupplierBox = document.getElementById('ext-unmatched-supplier-box');
+  const supplierTbody = document.getElementById('ext-unmatched-supplier-table')?.querySelector('tbody');
+  if (supplierTbody) supplierTbody.innerHTML = '';
+  if (unmatchedSupplierBox && supplierTbody && unmatchedSupplierList.length > 0) {
+    unmatchedSupplierBox.classList.remove('hidden');
+    unmatchedSupplierList.forEach(s => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td style="font-weight: 600; color: #fff;">' + escapeHtml(s.supplier || '-') + '</td>' +
+        '<td style="font-family: monospace;">' + (s.item_count ?? 0) + '</td>' +
+        '<td style="font-family: monospace; color: #fbbf24;">¥ ' + formatMoney(s.amount) + '</td>';
+      supplierTbody.appendChild(tr);
+    });
+  } else if (unmatchedSupplierBox) {
+    unmatchedSupplierBox.classList.add('hidden');
   }
 
   // 计数提示
@@ -2884,4 +2904,3 @@ window.addEventListener('DOMContentLoaded', async () => {
   loadConfigData();
   triggerFileScan();
 });
-

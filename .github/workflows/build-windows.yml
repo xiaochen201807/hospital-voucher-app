@@ -55,9 +55,11 @@ jobs:
         working-directory: desktop_app
         run: npm install
 
-      - name: Run Full Automated Test Suite (Internal & External Accounting)
+      - name: Run Rust Unit Test Suite
         working-directory: desktop_app/src-tauri
-        run: cargo test --verbose -- --nocapture
+        # 业务 Excel 样例未纳入仓库；依赖样例的端到端测试已显式标记 ignored，
+        # 本地可在准备好样例后运行 cargo test --lib -- --ignored --test-threads=1。
+        run: cargo test --lib --verbose -- --nocapture
 
       - name: Build Pure Rust Tauri App (Windows)
         if: matrix.platform == 'windows'

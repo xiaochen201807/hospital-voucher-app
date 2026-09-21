@@ -1092,7 +1092,7 @@
                 </div>
                 <div class="stat-card warning" id="card-ext-unmatched">
                   <div class="stat-val" id="stat-ext-unmatched">-</div>
-                  <div class="stat-label">待补全存货编码</div>
+                  <div class="stat-label">待补全存货 / 供应商编码</div>
                 </div>
               </div>
 
@@ -1115,6 +1115,28 @@
                         <th>数量</th>
                         <th>进价金额</th>
                         <th>供货商</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- 未匹配供应商告警 -->
+              <div id="ext-unmatched-supplier-box" class="unmatched-box hidden">
+                <div class="unmatched-header">
+                  <div class="unmatched-title">
+                    <span class="badge badge-warning">提示</span>
+                    <span>以下供应商在外账模板【辅助信息】中未找到辅助编码，生成的 2202 贷方分录需要人工补全：</span>
+                  </div>
+                </div>
+                <div class="table-container">
+                  <table class="data-table" id="ext-unmatched-supplier-table">
+                    <thead>
+                      <tr>
+                        <th>供应商</th>
+                        <th>明细行数</th>
+                        <th>汇总金额</th>
                       </tr>
                     </thead>
                     <tbody></tbody>
