@@ -55,6 +55,10 @@ jobs:
         working-directory: desktop_app
         run: npm install
 
+      - name: Run Full Automated Test Suite (Internal & External Accounting)
+        working-directory: desktop_app/src-tauri
+        run: cargo test --verbose -- --nocapture
+
       - name: Build Pure Rust Tauri App (Windows)
         if: matrix.platform == 'windows'
         working-directory: desktop_app

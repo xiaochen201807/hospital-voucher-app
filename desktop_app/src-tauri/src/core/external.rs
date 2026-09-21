@@ -1,12 +1,12 @@
 use crate::core::config::ConfigData;
 use crate::core::excel_utils::{cell_as_f64, cell_as_string, open_excel};
-use crate::core::voucher_writer::{copy_template_sheets, load_template_sheets};
 use calamine::{Data, Reader};
 use chrono::{Datelike, Local, NaiveDate};
 use regex::Regex;
 use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// 归一化文本：去除所有空白字符，统一全角半角括号
@@ -340,10 +340,20 @@ fn get_default_factory_abbr_map() -> HashMap<&'static str, &'static str> {
     m.insert("山东新时代药业有限公司", "新时代");
     m.insert("石药集团中诺药业(石家庄)有限公司", "中诺");
     m.insert("正大天晴药业集团股份有限公司", "正大天晴");
-    m.insert("扬子江药业集团有限公司", "扬子江");
-    m.insert("通化东宝药业股份有限公司", "通化东宝");
-    m.insert("远大医药(中国)有限公司", "远大");
     m.insert("长春高新技术产业(集团)股份有限公司", "金赛");
+    m
+}
+
+fn get_merged_factory_abbr_map(config: Option<&ConfigData>) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for (k, v) in get_default_factory_abbr_map() {
+        m.insert(k.to_string(), v.to_string());
+    }
+    if let Some(cfg) = config {
+        for (k, v) in &cfg.factory_abbreviations {
+            m.insert(k.clone(), v.clone());
+        }
+    }
     m
 }
 
@@ -352,7 +362,7 @@ fn match_external_inventory_code(
     spec: &str,
     factory: &str,
     items: &[ExternalInventoryItem],
-    factory_map: &HashMap<&str, &str>,
+    factory_map: &HashMap<String, String>,
 ) -> Option<(String, String)> {
     let norm_name = normalize_text(name);
     let clean_name = clean_drug_name(name);
@@ -360,8 +370,8 @@ fn match_external_inventory_code(
     let norm_factory = normalize_text(factory);
 
     let abbr = factory_map.iter().find_map(|(full, b)| {
-        if norm_factory.contains(*full) || norm_factory.contains(*b) {
-            Some(*b)
+        if norm_factory.contains(full) || norm_factory.contains(b) {
+            Some(b.as_str())
         } else {
             None
         }
@@ -443,7 +453,7 @@ pub fn generate_external_inbound_voucher(
     _config: Option<&ConfigData>,
 ) -> Result<ExternalInboundResult, String> {
     let template_data = load_external_template(template_path)?;
-    let factory_abbr = get_default_factory_abbr_map();
+    let factory_abbr = get_merged_factory_abbr_map(_config);
 
     let mut in_excel = open_excel(inbound_path)?;
     let in_sheet = in_excel
@@ -719,7 +729,7 @@ pub fn generate_external_outbound_voucher(
     _config: Option<&ConfigData>,
 ) -> Result<ExternalOutboundResult, String> {
     let template_data = load_external_template(template_path)?;
-    let factory_abbr = get_default_factory_abbr_map();
+    let factory_abbr = get_merged_factory_abbr_map(_config);
 
     let mut sales_excel = open_excel(sales_path)?;
     let sheet_names = sales_excel.sheet_names();
@@ -790,7 +800,9 @@ pub fn generate_external_outbound_voucher(
         amount: f64,
     }
 
-    let mut raw_items = Vec::new();
+    let mut raw_items: Vec<RawSaleItem> = Vec::new();
+    let mut group_map: HashMap<(String, String, String), usize> = HashMap::new();
+
     for (r_idx, row) in rows.iter().enumerate().skip(header_idx + 1) {
         let name = cell_as_string(row.get(col_name).unwrap_or(&Data::Empty)).trim().to_string();
         if name.is_empty() || name.contains("合计") || name.contains("总计") || name.contains("制表") {
@@ -808,15 +820,23 @@ pub fn generate_external_outbound_voucher(
             (qty * price * 100.0).round() / 100.0
         };
 
-        raw_items.push(RawSaleItem {
-            row_no: r_idx + 1,
-            name,
-            spec,
-            factory,
-            qty,
-            price,
-            amount,
-        });
+        let key = (normalize_text(&name), normalize_text(&spec), normalize_text(&factory));
+        if let Some(&idx) = group_map.get(&key) {
+            raw_items[idx].qty += qty;
+            raw_items[idx].amount = ((raw_items[idx].amount + amount) * 100.0).round() / 100.0;
+        } else {
+            let idx = raw_items.len();
+            raw_items.push(RawSaleItem {
+                row_no: r_idx + 1,
+                name,
+                spec,
+                factory,
+                qty,
+                price,
+                amount,
+            });
+            group_map.insert(key, idx);
+        }
     }
 
     let voucher_date = detect_month_end_date(custom_date, sales_path.to_str());
@@ -958,7 +978,7 @@ pub fn generate_external_inventory_audit(
     _config: Option<&ConfigData>,
 ) -> Result<ExternalAuditResult, String> {
     let template_data = load_external_template(template_path)?;
-    let factory_abbr = get_default_factory_abbr_map();
+    let factory_abbr = get_merged_factory_abbr_map(_config);
 
     let mut wh_excel = open_excel(warehouse_path)?;
     let wh_sheet = wh_excel
@@ -1156,150 +1176,171 @@ pub fn generate_external_inventory_audit(
 // 6. Excel 文件写出支持 (凭证 Sheet 与比对报告)
 // ----------------------------------------------------
 
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn write_external_voucher_workbook(
     template_path: &Path,
     output_path: &Path,
     voucher_rows: &[ExternalVoucherRow],
 ) -> Result<(), String> {
-    let sheets = load_template_sheets(template_path)?;
-    let mut workbook = Workbook::new();
+    let file = std::fs::File::open(template_path).map_err(|e| format!("打开模板文件失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析模板 zip 失败: {}", e))?;
 
-    copy_template_sheets(&mut workbook, &sheets)?;
+    // 1. 动态寻找凭证 sheet 的 xml 内部路径 (通常是 xl/worksheets/sheet6.xml)
+    let mut voucher_sheet_entry_name = "xl/worksheets/sheet6.xml".to_string();
+    let mut wb_xml = String::new();
+    if let Ok(mut wb_entry) = archive.by_name("xl/workbook.xml") {
+        let _ = wb_entry.read_to_string(&mut wb_xml);
+    }
+    let mut rels_xml = String::new();
+    if let Ok(mut rels_entry) = archive.by_name("xl/_rels/workbook.xml.rels") {
+        let _ = rels_entry.read_to_string(&mut rels_xml);
+    }
 
-    let worksheet = workbook.add_worksheet();
-    worksheet.set_name("凭证").map_err(|e| e.to_string())?;
-
-    let font_family = "微软雅黑";
-
-    let title_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(14)
-        .set_bold();
-
-    let header_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_bold()
-        .set_align(FormatAlign::Center)
-        .set_border(FormatBorder::Thin)
-        .set_background_color(Color::RGB(0xEAEEF4));
-
-    let text_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_border(FormatBorder::Thin);
-
-    let center_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_align(FormatAlign::Center)
-        .set_border(FormatBorder::Thin);
-
-    let money_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_num_format("#,##0.00")
-        .set_align(FormatAlign::Right)
-        .set_border(FormatBorder::Thin);
-
-    let qty_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_num_format("#,##0.##")
-        .set_align(FormatAlign::Right)
-        .set_border(FormatBorder::Thin);
-
-    let warn_format = Format::new()
-        .set_font_name(font_family)
-        .set_font_size(10)
-        .set_background_color(Color::RGB(0xFFFAD2))
-        .set_border(FormatBorder::Thin);
-
-    let original_voucher = sheets.iter().find(|s| s.name.contains("凭证"));
-    if let Some(orig) = original_voucher {
-        for (r_idx, row) in orig.rows.iter().enumerate().take(3) {
-            for (c_idx, cell) in row.iter().enumerate() {
-                let text = cell_as_string(cell);
-                if r_idx == 2 {
-                    worksheet
-                        .write_string_with_format(r_idx as u32, c_idx as u16, &text, &header_format)
-                        .map_err(|e| e.to_string())?;
-                } else if r_idx == 0 {
-                    worksheet
-                        .write_string_with_format(r_idx as u32, c_idx as u16, &text, &title_format)
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    worksheet
-                        .write_string(r_idx as u32, c_idx as u16, &text)
-                        .map_err(|e| e.to_string())?;
+    if let Some(pos) = wb_xml.find("name=\"凭证\"") {
+        let rest = &wb_xml[pos..];
+        if let Some(rid_pos) = rest.find("r:id=\"") {
+            let rid_str = &rest[rid_pos + 6..];
+            if let Some(rid_end) = rid_str.find('"') {
+                let rid = &rid_str[..rid_end];
+                let search_rid = format!("Id=\"{}\"", rid);
+                if let Some(r_pos) = rels_xml.find(&search_rid) {
+                    let r_rest = &rels_xml[r_pos..];
+                    if let Some(target_pos) = r_rest.find("Target=\"") {
+                        let target_str = &r_rest[target_pos + 8..];
+                        if let Some(target_end) = target_str.find('"') {
+                            let target = &target_str[..target_end];
+                            let full_target = if target.starts_with('/') {
+                                target.trim_start_matches('/').to_string()
+                            } else {
+                                format!("xl/{}", target)
+                            };
+                            voucher_sheet_entry_name = full_target;
+                        }
+                    }
                 }
             }
         }
-    } else {
-        let headers = [
-            "*记账日期", "*凭证类型", "*凭证号", "*摘要", "*科目编码", "*科目名称",
-            "*本币借方金额", "*本币贷方金额", "汇率", "币别", "数量", "辅助编码",
-            "辅助名称", "结算方式", "票号", "发生日期",
-        ];
-        for (c_idx, h) in headers.iter().enumerate() {
-            worksheet
-                .write_string_with_format(2, c_idx as u16, *h, &header_format)
-                .map_err(|e| e.to_string())?;
-        }
     }
 
+    // 2. 读取原凭证 sheet 的 xml，保留前 3 行表头及尾部标签，只替换分录数据
+    let mut original_sheet_xml = String::new();
+    {
+        let mut sheet_entry = archive
+            .by_name(&voucher_sheet_entry_name)
+            .map_err(|e| format!("未在模板中找到凭证工作表 {}: {}", voucher_sheet_entry_name, e))?;
+        sheet_entry
+            .read_to_string(&mut original_sheet_xml)
+            .map_err(|e| format!("读取凭证工作表失败: {}", e))?;
+    }
+
+    let row3_tag = "<row r=\"3\"";
+    let row3_pos = original_sheet_xml
+        .find(row3_tag)
+        .ok_or_else(|| "模板凭证 sheet 中未找到第 3 行表头".to_string())?;
+    let row3_end_tag = "</row>";
+    let row3_end_rel = original_sheet_xml[row3_pos..]
+        .find(row3_end_tag)
+        .ok_or_else(|| "模板凭证 sheet 第 3 行闭合标签未找到".to_string())?;
+    let header_end_idx = row3_pos + row3_end_rel + row3_end_tag.len();
+
+    let sheet_data_end_tag = "</sheetData>";
+    let tail_start_idx = original_sheet_xml
+        .find(sheet_data_end_tag)
+        .ok_or_else(|| "模板凭证 sheet 中未找到 </sheetData>".to_string())?;
+
+    let header_xml = &original_sheet_xml[..header_end_idx];
+    let tail_xml = &original_sheet_xml[tail_start_idx..];
+
+    // 构建所有分录行 XML (从第 4 行开始，I/J 不填，P 列不写)
+    let mut new_rows_xml = String::with_capacity(voucher_rows.len() * 350);
     for (idx, row) in voucher_rows.iter().enumerate() {
-        let r = (idx + 3) as u32;
+        let r = idx + 4;
+        new_rows_xml.push_str(&format!("<row r=\"{}\" spans=\"1:15\" customHeight=\"1\">", r));
 
-        worksheet.write_string_with_format(r, 0, &row.date, &center_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 1, &row.voucher_type, &center_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 2, &row.voucher_no, &center_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 3, &row.summary, &text_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 4, &row.subject_code, &center_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 5, &row.subject_name, &text_format).map_err(|e| e.to_string())?;
+        // A 列: *记账日期
+        new_rows_xml.push_str(&format!("<c r=\"A{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.date)));
+        // B 列: *凭证类型
+        new_rows_xml.push_str(&format!("<c r=\"B{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.voucher_type)));
+        // C 列: *凭证号
+        new_rows_xml.push_str(&format!("<c r=\"C{}\"><v>{}</v></c>", r, escape_xml(&row.voucher_no)));
+        // D 列: *摘要
+        new_rows_xml.push_str(&format!("<c r=\"D{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.summary)));
+        // E 列: *科目编码
+        new_rows_xml.push_str(&format!("<c r=\"E{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.subject_code)));
+        // F 列: *科目名称
+        new_rows_xml.push_str(&format!("<c r=\"F{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.subject_name)));
 
+        // G 列: *本币借方金额
         if let Some(amt) = row.debit_amount {
-            worksheet.write_number_with_format(r, 6, amt, &money_format).map_err(|e| e.to_string())?;
-        } else {
-            worksheet.write_blank(r, 6, &text_format).map_err(|e| e.to_string())?;
+            new_rows_xml.push_str(&format!("<c r=\"G{}\"><v>{:.2}</v></c>", r, amt));
         }
 
+        // H 列: *本币贷方金额
         if let Some(amt) = row.credit_amount {
-            worksheet.write_number_with_format(r, 7, amt, &money_format).map_err(|e| e.to_string())?;
-        } else {
-            worksheet.write_blank(r, 7, &text_format).map_err(|e| e.to_string())?;
+            new_rows_xml.push_str(&format!("<c r=\"H{}\"><v>{:.2}</v></c>", r, amt));
         }
 
-        worksheet.write_number_with_format(r, 8, row.exchange_rate.unwrap_or(1.0), &center_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 9, &row.currency, &center_format).map_err(|e| e.to_string())?;
+        // I 列和 J 列：不填 (留空)
 
+        // K 列: 数量
         if let Some(qty) = row.qty {
-            worksheet.write_number_with_format(r, 10, qty, &qty_format).map_err(|e| e.to_string())?;
-        } else {
-            worksheet.write_blank(r, 10, &text_format).map_err(|e| e.to_string())?;
+            new_rows_xml.push_str(&format!("<c r=\"K{}\"><v>{}</v></c>", r, qty));
         }
 
-        let code_fmt = if row.is_unmatched { &warn_format } else { &center_format };
-        worksheet.write_string_with_format(r, 11, &row.aux_code, code_fmt).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 12, &row.aux_name, &text_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 13, &row.settle_method, &text_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 14, &row.bill_no, &text_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(r, 15, &row.occur_date, &center_format).map_err(|e| e.to_string())?;
+        // L 列: 辅助编码
+        if !row.aux_code.is_empty() {
+            new_rows_xml.push_str(&format!("<c r=\"L{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.aux_code)));
+        }
+
+        // M 列: 辅助名称
+        if !row.aux_name.is_empty() {
+            new_rows_xml.push_str(&format!("<c r=\"M{}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r, escape_xml(&row.aux_name)));
+        }
+
+        // N 列 (附件数), O 列 (制单人), P 列 (扩展列) 均不写入任何内容！
+        new_rows_xml.push_str("</row>");
     }
 
-    worksheet.set_column_width(0, 13).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(1, 8).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(2, 8).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(3, 24).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(4, 12).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(5, 14).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(6, 14).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(7, 14).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(10, 10).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(11, 12).map_err(|e| e.to_string())?;
-    worksheet.set_column_width(12, 28).map_err(|e| e.to_string())?;
+    let new_sheet_xml = format!("{}{}{}", header_xml, new_rows_xml, tail_xml);
 
-    workbook.save(output_path).map_err(|e| format!("保存 Excel 失败: {}", e))?;
+    // 3. 将原模板除凭证外的所有 sheet 及元数据原封不动写入输出文件 (100% 字节级保真)
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let out_file = std::fs::File::create(output_path).map_err(|e| format!("创建输出文件失败: {}", e))?;
+    let mut zip_writer = zip::ZipWriter::new(out_file);
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("读取 zip entry 失败: {}", e))?;
+        let entry_name = entry.name().to_string();
+
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(entry.compression())
+            .unix_permissions(entry.unix_mode().unwrap_or(0o644));
+
+        if entry_name == voucher_sheet_entry_name {
+            zip_writer
+                .start_file(&entry_name, options)
+                .map_err(|e| format!("写入新凭证 sheet 失败: {}", e))?;
+            std::io::Write::write_all(&mut zip_writer, new_sheet_xml.as_bytes())
+                .map_err(|e| format!("写入凭证 xml 数据失败: {}", e))?;
+        } else {
+            zip_writer
+                .start_file(&entry_name, options)
+                .map_err(|e| format!("写入 entry {} 失败: {}", entry_name, e))?;
+            std::io::copy(&mut entry, &mut zip_writer)
+                .map_err(|e| format!("复制 entry {} 失败: {}", entry_name, e))?;
+        }
+    }
+
+    zip_writer.finish().map_err(|e| format!("完成 zip 压缩失败: {}", e))?;
     Ok(())
 }
 
