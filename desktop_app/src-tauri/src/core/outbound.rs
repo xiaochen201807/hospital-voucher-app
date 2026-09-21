@@ -672,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "依赖未提交的业务 Excel 样例；本地有样例时使用 cargo test --lib -- --ignored"]
     fn real_outbound_workbook_still_generates_successfully() {
         let (config, _) = crate::core::config::load_config(None);
         let output = std::env::temp_dir().join(format!(

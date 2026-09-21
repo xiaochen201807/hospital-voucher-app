@@ -456,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "依赖未提交的业务 Excel 样例；本地有样例时使用 cargo test --lib -- --ignored"]
     fn real_inbound_workbook_uses_business_date_and_correct_summary() {
         let (config, _) = crate::core::config::load_config(None);
         let output = std::env::temp_dir().join(format!(
