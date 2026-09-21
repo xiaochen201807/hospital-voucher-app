@@ -5,6 +5,7 @@ node_modules/
 target/
 **/target/
 Cargo.lock
+!desktop_app/src-tauri/Cargo.lock
 
 # Python cache & build
 __pycache__/
