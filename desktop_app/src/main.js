@@ -29,13 +29,25 @@ const invoke = getInvoke();
 // 全局应用状态
 const state = {
   activeTab: 'tab-sales',
+  currentSystem: 'internal',
+  activeInternalTab: 'tab-sales',
+  activeExternalTab: 'tab-ext-inbound',
+  extInboundData: null,
+  extInboundFilter: 'ALL',
+  extOutboundData: null,
+  extOutboundFilter: 'ALL',
+  extCompareData: null,
+  extCompareFilter: 'ALL',
   scannedFiles: null,
   configData: null,
   lastOutputs: {
     sales: null,
     outbound: null,
     inbound: null,
-    compare: null
+    compare: null,
+    extInbound: null,
+    extOutbound: null,
+    extCompare: null
   },
   auditData: null,
   currentAuditCat: 'ALL',
@@ -657,6 +669,40 @@ function autoFillDetectedFiles(data) {
     setAutoFilledFile(cmpHc, hcFile.path);
   }
 
+  // 外账入库凭证输入框
+  const extInbound = document.getElementById('ext-inbound-file');
+  const extTmpl = document.getElementById('ext-template-file');
+  if (extInbound && !extInbound.value && inboundFile) {
+    setAutoFilledFile(extInbound, inboundFile.path);
+  }
+  const extTemplateCandidate = findUniqueScannedFile(
+    data.all_excel || [],
+    file => file.name.includes('迁账') || file.name.includes('外账')
+  );
+  if (extTmpl && !extTmpl.value && extTemplateCandidate) {
+    setAutoFilledFile(extTmpl, extTemplateCandidate.path);
+  }
+
+  // 外账出库凭证输入框
+  const extOutSales = document.getElementById('ext-outbound-sales-file');
+  const extOutTmpl = document.getElementById('ext-outbound-template-file');
+  if (extOutSales && !extOutSales.value && salesFile) {
+    setAutoFilledFile(extOutSales, salesFile.path);
+  }
+  if (extOutTmpl && !extOutTmpl.value && extTemplateCandidate) {
+    setAutoFilledFile(extOutTmpl, extTemplateCandidate.path);
+  }
+
+  // 外账结存数比对输入框
+  const extCmpTmpl = document.getElementById('ext-compare-template-file');
+  const extCmpWh = document.getElementById('ext-compare-wh-file');
+  if (extCmpTmpl && !extCmpTmpl.value && extTemplateCandidate) {
+    setAutoFilledFile(extCmpTmpl, extTemplateCandidate.path);
+  }
+  if (extCmpWh && !extCmpWh.value && westFile) {
+    setAutoFilledFile(extCmpWh, westFile.path);
+  }
+
   if (ledgerFiles.length > 1) {
     [obLedger, inLedger, cmpLedger].forEach(input => {
       if (input?.dataset.autoFilled === 'true') {
@@ -711,6 +757,30 @@ function applyScannedFileToActiveTab(item) {
     } else {
       setManuallySelectedFile(document.getElementById('compare-west-file'), item.path);
       showToast(`已填入库管库存表: ${name}`, 'info');
+    }
+  } else if (state.activeTab === 'tab-ext-inbound') {
+    if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
+      setManuallySelectedFile(document.getElementById('ext-template-file'), item.path);
+      showToast(`已填入外账参考模板: ${name}`, 'info');
+    } else {
+      setManuallySelectedFile(document.getElementById('ext-inbound-file'), item.path);
+      showToast(`已填入入库单: ${name}`, 'info');
+    }
+  } else if (state.activeTab === 'tab-ext-outbound') {
+    if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
+      setManuallySelectedFile(document.getElementById('ext-outbound-template-file'), item.path);
+      showToast(`已填入外账参考模板: ${name}`, 'info');
+    } else {
+      setManuallySelectedFile(document.getElementById('ext-outbound-sales-file'), item.path);
+      showToast(`已填入销售汇总表: ${name}`, 'info');
+    }
+  } else if (state.activeTab === 'tab-ext-compare') {
+    if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
+      setManuallySelectedFile(document.getElementById('ext-compare-template-file'), item.path);
+      showToast(`已填入外账参考模板: ${name}`, 'info');
+    } else {
+      setManuallySelectedFile(document.getElementById('ext-compare-wh-file'), item.path);
+      showToast(`已填入库管在库报表: ${name}`, 'info');
     }
   }
 }
@@ -1288,6 +1358,549 @@ function renderInboundResult(data) {
     unmatchedBox.classList.add('hidden');
     updateVoucherManualButton('btn-rerun-inbound-manual', state.inboundManualMappings, false);
   }
+}
+
+// ----------------------------------------------------
+// 2.5 TAB: 外账入库凭证生成 (迁账导入模板)
+// ----------------------------------------------------
+function initTabExtInbound() {
+  const inInbound = document.getElementById('ext-inbound-file');
+  const inTemplate = document.getElementById('ext-template-file');
+  const inOutput = document.getElementById('ext-output-file');
+  const inDate = document.getElementById('ext-inbound-date');
+  const inNo = document.getElementById('ext-inbound-no');
+  const btnRun = document.getElementById('btn-run-ext-inbound');
+
+  bindFilePicker('btn-browse-ext-inbound', inInbound, '选择药品入库单 (西药或中药)');
+  bindFilePicker('btn-browse-ext-template', inTemplate, '选择外账表格迁账参考模板');
+
+  setupDropzone(inInbound, inInbound.closest('.file-input-wrapper'));
+  setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
+
+  btnRun.onclick = async () => {
+    const inbound = inInbound.value.trim();
+    const template = inTemplate.value.trim();
+    const output = inOutput.value.trim() || '表格迁账参考模板_西药入库_已生成.xlsx';
+    const dateVal = inDate.value.trim() || null;
+    const voucherNo = inNo.value.trim() || '1';
+
+    if (!inbound) return showToast('请指定药品入库单文件', 'warning');
+    if (!template) return showToast('请指定外账迁账参考模板', 'warning');
+
+    const res = await invokeWithLoading('execute_external_inbound_voucher', {
+      inbound,
+      template,
+      output,
+      date: dateVal,
+      voucherNo,
+      config: null
+    }, {
+      loadingMessage: '正在解析入库单、匹配外账5位存货与供应商编码并生成凭证...',
+      errorPrefix: '生成外账凭证失败',
+      errorDuration: 6000
+    });
+    if (!res) return;
+
+    state.lastOutputs.extInbound = res.output_file;
+    state.extInboundData = res;
+    state.extInboundFilter = 'ALL';
+    renderExtInboundResult(res);
+    showToast('外账入库凭证生成成功！', 'success');
+  };
+
+  const btnOpen = document.getElementById('btn-open-ext-file');
+  if (btnOpen) {
+    btnOpen.onclick = () => {
+      openSystemPath(state.lastOutputs.extInbound);
+    };
+  }
+
+  const btnShow = document.getElementById('btn-show-ext-folder');
+  if (btnShow) {
+    btnShow.onclick = () => {
+      showInSystemFolder(state.lastOutputs.extInbound);
+    };
+  }
+
+  // 预览过滤按钮
+  const filterPills = document.querySelectorAll('#ext-preview-filters .filter-pill');
+  filterPills.forEach(pill => {
+    pill.onclick = () => {
+      filterPills.forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      state.extInboundFilter = pill.dataset.filter;
+      renderExtPreviewTable();
+    };
+  });
+}
+
+function renderExtInboundResult(data) {
+  const box = document.getElementById('ext-inbound-result');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  // 指标卡片
+  document.getElementById('stat-ext-items').textContent = `${data.total_items} 药 / ${data.supplier_count} 供`;
+  document.getElementById('stat-ext-entries').textContent = `${data.total_entries} 行`;
+  document.getElementById('stat-ext-amt').textContent = `¥ ${formatMoney(data.total_debit)}`;
+
+  const balanceCard = document.getElementById('card-ext-balance');
+  const balanceVal = document.getElementById('stat-ext-balance');
+  if (data.is_balanced) {
+    balanceCard.className = 'stat-card highlight';
+    balanceVal.innerHTML = '<span style="color:#10b981;">✅ 借贷平衡 (¥0.00)</span>';
+  } else {
+    balanceCard.className = 'stat-card warning';
+    balanceVal.innerHTML = `<span style="color:#ef4444;">❌ 差额: ¥${formatMoney(data.diff)}</span>`;
+  }
+
+  const unmatchedCard = document.getElementById('card-ext-unmatched');
+  const unmatchedVal = document.getElementById('stat-ext-unmatched');
+  if (data.unmatched_count === 0) {
+    unmatchedCard.className = 'stat-card';
+    unmatchedVal.innerHTML = '<span style="color:#10b981;">0 (全部命中)</span>';
+  } else {
+    unmatchedCard.className = 'stat-card warning';
+    unmatchedVal.innerHTML = `<span style="color:#f59e0b;">${data.unmatched_count} 笔 (标黄)</span>`;
+  }
+
+  // 未匹配清单
+  const unmatchedBox = document.getElementById('ext-unmatched-box');
+  const tbodyUnmatched = document.getElementById('ext-unmatched-table').querySelector('tbody');
+  tbodyUnmatched.innerHTML = '';
+  const unmatchedList = data.unmatched_drugs || [];
+  if (unmatchedList.length > 0) {
+    unmatchedBox.classList.remove('hidden');
+    unmatchedList.forEach(d => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-family: monospace;">${d.row_index}</td>
+        <td style="font-weight: 600; color: #fff;">${escapeHtml(d.name)}</td>
+        <td>${escapeHtml(d.spec || '-')}</td>
+        <td>${escapeHtml(d.factory || '-')}</td>
+        <td style="font-family: monospace;">${d.qty}</td>
+        <td style="font-family: monospace; color: #fbbf24;">¥ ${formatMoney(d.amount)}</td>
+        <td>${escapeHtml(d.supplier || '-')}</td>
+      `;
+      tbodyUnmatched.appendChild(tr);
+    });
+  } else {
+    unmatchedBox.classList.add('hidden');
+  }
+
+  // 计数提示
+  const rows = data.voucher_rows || [];
+  const debitRows = rows.filter(r => !r.is_credit);
+  const creditRows = rows.filter(r => r.is_credit);
+  const unmatchedRows = rows.filter(r => r.is_unmatched);
+
+  document.getElementById('cnt-ext-all').textContent = rows.length;
+  document.getElementById('cnt-ext-debit').textContent = debitRows.length;
+  document.getElementById('cnt-ext-credit').textContent = creditRows.length;
+  document.getElementById('cnt-ext-unmatched').textContent = unmatchedRows.length;
+  document.getElementById('ext-preview-count-tip').textContent = `共 ${rows.length} 行凭证分录 (已写入 ${escapeHtml(data.output_file)})`;
+
+  renderExtPreviewTable();
+}
+
+function renderExtPreviewTable() {
+  if (!state.extInboundData || !state.extInboundData.voucher_rows) return;
+  const tbody = document.getElementById('ext-preview-table').querySelector('tbody');
+  tbody.innerHTML = '';
+
+  const filter = state.extInboundFilter || 'ALL';
+  const rows = state.extInboundData.voucher_rows.filter(r => {
+    if (filter === 'DEBIT') return !r.is_credit;
+    if (filter === 'CREDIT') return r.is_credit;
+    if (filter === 'UNMATCHED') return r.is_unmatched;
+    return true;
+  });
+
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    if (r.is_credit) tr.className = 'row-credit';
+    else if (r.is_unmatched) tr.className = 'row-unmatched';
+
+    const statusBadge = r.is_unmatched
+      ? '<span class="badge badge-warning">待补录</span>'
+      : (r.is_credit ? '<span class="badge badge-success">贷方汇总</span>' : '<span class="badge" style="background:rgba(255,255,255,0.06);color:#94a3b8;">借方明细</span>');
+
+    tr.innerHTML = `
+      <td style="font-family: monospace; color: #64748b;">${r.row_no}</td>
+      <td style="font-family: monospace;">${escapeHtml(r.date)}</td>
+      <td style="text-align: center;">${escapeHtml(r.voucher_type)}</td>
+      <td style="text-align: center; font-family: monospace;">${escapeHtml(r.voucher_no)}</td>
+      <td>${escapeHtml(r.summary)}</td>
+      <td style="font-family: monospace; color: ${r.is_credit ? '#34d399' : '#38bdf8'}; font-weight: 600;">${escapeHtml(r.subject_code)}</td>
+      <td>${escapeHtml(r.subject_name)}</td>
+      <td style="text-align: right; font-family: monospace; color: ${r.debit_amount ? '#38bdf8' : ''}; font-weight: ${r.debit_amount ? '600' : 'normal'};">
+        ${r.debit_amount !== null ? formatMoney(r.debit_amount) : ''}
+      </td>
+      <td style="text-align: right; font-family: monospace; color: ${r.credit_amount ? '#34d399' : ''}; font-weight: ${r.credit_amount ? '700' : 'normal'};">
+        ${r.credit_amount !== null ? formatMoney(r.credit_amount) : ''}
+      </td>
+      <td style="text-align: right; font-family: monospace;">${r.qty !== null ? r.qty : ''}</td>
+      <td style="font-family: monospace; font-weight: 600; color: ${r.aux_code ? '#38bdf8' : '#fbbf24'};">
+        ${r.aux_code ? escapeHtml(r.aux_code) : '⚠️ 未匹配'}
+      </td>
+      <td style="color: ${r.is_credit ? '#a7f3d0' : '#f8fafc'}; font-weight: ${r.is_credit ? '600' : 'normal'};">
+        ${escapeHtml(r.aux_name)}
+      </td>
+      <td style="text-align: center;">${statusBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ----------------------------------------------------
+// 5.2 TAB: 外账出库凭证生成 (销售成本结转)
+// ----------------------------------------------------
+function initTabExtOutbound() {
+  const inSales = document.getElementById('ext-outbound-sales-file');
+  const inTemplate = document.getElementById('ext-outbound-template-file');
+  const inOutput = document.getElementById('ext-outbound-output-file');
+  const inDate = document.getElementById('ext-outbound-date');
+  const inNo = document.getElementById('ext-outbound-no');
+  const btnRun = document.getElementById('btn-run-ext-outbound');
+
+  bindFilePicker('btn-browse-ext-outbound-sales', inSales, '选择销售明细汇总表');
+  bindFilePicker('btn-browse-ext-outbound-template', inTemplate, '选择外账迁账参考模板');
+
+  if (inSales) setupDropzone(inSales, inSales.closest('.file-input-wrapper'));
+  if (inTemplate) setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
+
+  // 默认日期设为当前月末最后一天
+  if (inDate && !inDate.value) {
+    const now = new Date();
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    inDate.value = lastDay.toISOString().split('T')[0];
+  }
+
+  btnRun.onclick = async () => {
+    const sales = inSales.value.trim();
+    const template = inTemplate.value.trim();
+    const output = inOutput.value.trim() || '表格迁账参考模板_西药出库_已生成.xlsx';
+    const dateVal = inDate.value.trim() || null;
+    const voucherNo = inNo.value.trim() || '1';
+
+    if (!sales) return showToast('请指定销售明细汇总表文件', 'warning');
+    if (!template) return showToast('请指定外账迁账参考模板', 'warning');
+
+    const res = await invokeWithLoading('execute_external_outbound_voucher', {
+      sales,
+      template,
+      output,
+      date: dateVal,
+      voucherNo,
+      config: null
+    }, {
+      loadingMessage: '正在解析销售汇总、匹配外账5位存货编码并生成成本结转凭证...',
+      errorPrefix: '生成外账出库凭证失败',
+      errorDuration: 6000
+    });
+    if (!res) return;
+
+    state.lastOutputs.extOutbound = res.output_file;
+    state.extOutboundData = res;
+    state.extOutboundFilter = 'ALL';
+    renderExtOutboundResult(res);
+    showToast('外账出库结转凭证生成成功！', 'success');
+  };
+
+  const btnOpen = document.getElementById('btn-open-ext-outbound-file');
+  if (btnOpen) {
+    btnOpen.onclick = () => {
+      openSystemPath(state.lastOutputs.extOutbound);
+    };
+  }
+
+  const btnShow = document.getElementById('btn-show-ext-outbound-folder');
+  if (btnShow) {
+    btnShow.onclick = () => {
+      showInSystemFolder(state.lastOutputs.extOutbound);
+    };
+  }
+
+  // 预览过滤按钮
+  const filterPills = document.querySelectorAll('#ext-outbound-preview-filters .filter-pill');
+  filterPills.forEach(pill => {
+    pill.onclick = () => {
+      filterPills.forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      state.extOutboundFilter = pill.dataset.filter;
+      renderExtOutboundPreviewTable();
+    };
+  });
+}
+
+function renderExtOutboundResult(data) {
+  const box = document.getElementById('ext-outbound-result');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  // 指标卡片
+  document.getElementById('stat-ext-outbound-items').textContent = `${data.total_items} 种销售药品`;
+  document.getElementById('stat-ext-outbound-entries').textContent = `${data.total_entries} 行`;
+  document.getElementById('stat-ext-outbound-amt').textContent = `¥ ${formatMoney(data.total_debit)}`;
+
+  const balanceCard = document.getElementById('card-ext-outbound-balance');
+  const balanceVal = document.getElementById('stat-ext-outbound-balance');
+  if (data.is_balanced) {
+    balanceCard.className = 'stat-card highlight';
+    balanceVal.innerHTML = '<span style="color:#10b981;">✅ 借贷平衡 (¥0.00)</span>';
+  } else {
+    balanceCard.className = 'stat-card warning';
+    balanceVal.innerHTML = `<span style="color:#ef4444;">❌ 差额: ¥${formatMoney(data.diff)}</span>`;
+  }
+
+  const unmatchedCard = document.getElementById('card-ext-outbound-unmatched');
+  const unmatchedVal = document.getElementById('stat-ext-outbound-unmatched');
+  if (data.unmatched_count === 0) {
+    unmatchedCard.className = 'stat-card';
+    unmatchedVal.innerHTML = '<span style="color:#10b981;">0 (全部命中)</span>';
+  } else {
+    unmatchedCard.className = 'stat-card warning';
+    unmatchedVal.innerHTML = `<span style="color:#f59e0b;">${data.unmatched_count} 笔 (标黄)</span>`;
+  }
+
+  // 未匹配清单
+  const unmatchedBox = document.getElementById('ext-outbound-unmatched-box');
+  const tbodyUnmatched = document.getElementById('ext-outbound-unmatched-table').querySelector('tbody');
+  tbodyUnmatched.innerHTML = '';
+  const unmatchedList = data.unmatched_drugs || [];
+  if (unmatchedList.length > 0) {
+    unmatchedBox.classList.remove('hidden');
+    unmatchedList.forEach(d => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-family: monospace;">${d.row_index}</td>
+        <td style="font-weight: 600; color: #fff;">${escapeHtml(d.name)}</td>
+        <td>${escapeHtml(d.spec || '-')}</td>
+        <td>${escapeHtml(d.factory || '-')}</td>
+        <td style="font-family: monospace;">${d.qty}</td>
+        <td style="font-family: monospace; color: #fbbf24;">¥ ${formatMoney(d.amount)}</td>
+      `;
+      tbodyUnmatched.appendChild(tr);
+    });
+  } else {
+    unmatchedBox.classList.add('hidden');
+  }
+
+  // 计数提示
+  const rows = data.voucher_rows || [];
+  const debitRows = rows.filter(r => !r.is_credit);
+  const creditRows = rows.filter(r => r.is_credit);
+  const unmatchedRows = rows.filter(r => r.is_unmatched);
+
+  document.getElementById('cnt-ext-outbound-all').textContent = rows.length;
+  document.getElementById('cnt-ext-outbound-debit').textContent = debitRows.length;
+  document.getElementById('cnt-ext-outbound-credit').textContent = creditRows.length;
+  document.getElementById('cnt-ext-outbound-unmatched').textContent = unmatchedRows.length;
+  document.getElementById('ext-outbound-preview-count-tip').textContent = `共 ${rows.length} 行凭证分录 (已写入 ${escapeHtml(data.output_file)})`;
+
+  renderExtOutboundPreviewTable();
+}
+
+function renderExtOutboundPreviewTable() {
+  if (!state.extOutboundData || !state.extOutboundData.voucher_rows) return;
+  const tbody = document.getElementById('ext-outbound-preview-table').querySelector('tbody');
+  tbody.innerHTML = '';
+
+  const filter = state.extOutboundFilter || 'ALL';
+  const rows = state.extOutboundData.voucher_rows.filter(r => {
+    if (filter === 'DEBIT') return !r.is_credit;
+    if (filter === 'CREDIT') return r.is_credit;
+    if (filter === 'UNMATCHED') return r.is_unmatched;
+    return true;
+  });
+
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    if (!r.is_credit) tr.className = 'row-debit';
+    else if (r.is_unmatched) tr.className = 'row-unmatched';
+
+    const statusBadge = r.is_unmatched
+      ? '<span class="badge badge-warning">待补录</span>'
+      : (!r.is_credit ? '<span class="badge badge-success">借方汇总</span>' : '<span class="badge" style="background:rgba(255,255,255,0.06);color:#94a3b8;">贷方明细</span>');
+
+    tr.innerHTML = `
+      <td style="font-family: monospace; color: #64748b;">${r.row_no}</td>
+      <td style="font-family: monospace;">${escapeHtml(r.date)}</td>
+      <td style="text-align: center;">${escapeHtml(r.voucher_type)}</td>
+      <td style="text-align: center; font-family: monospace;">${escapeHtml(r.voucher_no)}</td>
+      <td>${escapeHtml(r.summary)}</td>
+      <td style="font-family: monospace; color: ${r.is_credit ? '#38bdf8' : '#34d399'}; font-weight: 600;">${escapeHtml(r.subject_code)}</td>
+      <td>${escapeHtml(r.subject_name)}</td>
+      <td style="text-align: right; font-family: monospace; color: ${r.debit_amount ? '#34d399' : ''}; font-weight: ${r.debit_amount ? '700' : 'normal'};">
+        ${r.debit_amount !== null ? formatMoney(r.debit_amount) : ''}
+      </td>
+      <td style="text-align: right; font-family: monospace; color: ${r.credit_amount ? '#38bdf8' : ''}; font-weight: ${r.credit_amount ? '600' : 'normal'};">
+        ${r.credit_amount !== null ? formatMoney(r.credit_amount) : ''}
+      </td>
+      <td style="text-align: right; font-family: monospace;">${r.qty !== null ? r.qty : ''}</td>
+      <td style="font-family: monospace; font-weight: 600; color: ${r.aux_code ? '#38bdf8' : '#fbbf24'};">
+        ${r.aux_code ? escapeHtml(r.aux_code) : '⚠️ 未匹配'}
+      </td>
+      <td style="color: ${r.is_credit ? '#f8fafc' : '#a7f3d0'}; font-weight: ${r.is_credit ? 'normal' : '600'};">
+        ${escapeHtml(r.aux_name)}
+      </td>
+      <td style="text-align: center;">${statusBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ----------------------------------------------------
+// 5.3 TAB: 外账结存数智能比对 (辅助余额表 vs 库管实盘)
+// ----------------------------------------------------
+function initTabExtCompare() {
+  const inTemplate = document.getElementById('ext-compare-template-file');
+  const inWarehouse = document.getElementById('ext-compare-wh-file');
+  const inOutput = document.getElementById('ext-compare-output-file');
+  const btnRun = document.getElementById('btn-run-ext-compare');
+
+  bindFilePicker('btn-browse-ext-compare-template', inTemplate, '选择外账迁账参考模板');
+  bindFilePicker('btn-browse-ext-compare-wh', inWarehouse, '选择药库在库实盘报表');
+
+  if (inTemplate) setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
+  if (inWarehouse) setupDropzone(inWarehouse, inWarehouse.closest('.file-input-wrapper'));
+
+  btnRun.onclick = async () => {
+    const template = inTemplate.value.trim();
+    const warehouse = inWarehouse.value.trim();
+    const output = inOutput.value.trim() || '外账账实库存核对分析报告.xlsx';
+
+    if (!template) return showToast('请指定外账迁账参考模板', 'warning');
+    if (!warehouse) return showToast('请指定药库在库实盘报表', 'warning');
+
+    const res = await invokeWithLoading('execute_external_inventory_audit', {
+      template,
+      warehouse,
+      output,
+      config: null
+    }, {
+      loadingMessage: '正在比对外账辅助余额表与库管在库数据并计算四维差异...',
+      errorPrefix: '外账结存数比对失败',
+      errorDuration: 6000
+    });
+    if (!res) return;
+
+    state.lastOutputs.extCompare = res.output_file;
+    state.extCompareData = res;
+    state.extCompareFilter = 'ALL';
+    renderExtCompareResult(res);
+    showToast('外账账实库存核对完成！', 'success');
+  };
+
+  const btnOpen = document.getElementById('btn-open-ext-compare-file');
+  if (btnOpen) {
+    btnOpen.onclick = () => {
+      openSystemPath(state.lastOutputs.extCompare);
+    };
+  }
+
+  const btnShow = document.getElementById('btn-show-ext-compare-folder');
+  if (btnShow) {
+    btnShow.onclick = () => {
+      showInSystemFolder(state.lastOutputs.extCompare);
+    };
+  }
+
+  // 筛选标签
+  const filterPills = document.querySelectorAll('#ext-compare-filters .filter-pill');
+  filterPills.forEach(pill => {
+    pill.onclick = () => {
+      filterPills.forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      state.extCompareFilter = pill.dataset.filter;
+      renderExtCompareTable();
+    };
+  });
+}
+
+function renderExtCompareResult(data) {
+  const box = document.getElementById('ext-compare-result');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  // 指标卡片
+  document.getElementById('stat-ext-compare-total').textContent = `${data.total_items} 种品规`;
+  document.getElementById('stat-ext-compare-equal').textContent = `${data.equal_count} 种`;
+  document.getElementById('stat-ext-compare-diff').textContent = `${data.diff_count} 种`;
+  document.getElementById('stat-ext-compare-ext-only').textContent = `${data.ext_only_count} 种`;
+  document.getElementById('stat-ext-compare-wh-only').textContent = `${data.wh_only_count} 种`;
+  document.getElementById('stat-ext-compare-rate').textContent = `${data.match_rate}%`;
+
+  const diffCard = document.getElementById('card-ext-compare-diff');
+  if (data.diff_count === 0) {
+    diffCard.className = 'stat-card highlight';
+  } else {
+    diffCard.className = 'stat-card warning';
+  }
+
+  // 计数提示
+  const records = data.records || [];
+  const equalCount = records.filter(r => r.status === '完全吻合').length;
+  const diffCount = records.filter(r => r.status === '数量差异').length;
+  const extCount = records.filter(r => r.status === '仅外账有').length;
+  const whCount = records.filter(r => r.status === '仅库管有').length;
+
+  document.getElementById('cnt-ext-cmp-all').textContent = records.length;
+  document.getElementById('cnt-ext-cmp-equal').textContent = equalCount;
+  document.getElementById('cnt-ext-cmp-diff').textContent = diffCount;
+  document.getElementById('cnt-ext-cmp-ext').textContent = extCount;
+  document.getElementById('cnt-ext-cmp-wh').textContent = whCount;
+  document.getElementById('ext-compare-count-tip').textContent = `共 ${records.length} 条核对记录 (报告: ${escapeHtml(data.output_file)})`;
+
+  renderExtCompareTable();
+}
+
+function renderExtCompareTable() {
+  if (!state.extCompareData || !state.extCompareData.records) return;
+  const tbody = document.getElementById('ext-compare-table').querySelector('tbody');
+  tbody.innerHTML = '';
+
+  const filter = state.extCompareFilter || 'ALL';
+  const records = state.extCompareData.records.filter(r => {
+    if (filter === 'EQUAL') return r.status === '完全吻合';
+    if (filter === 'DIFF') return r.status === '数量差异';
+    if (filter === 'EXT_ONLY') return r.status === '仅外账有';
+    if (filter === 'WH_ONLY') return r.status === '仅库管有';
+    return true;
+  });
+
+  records.forEach((r, idx) => {
+    const tr = document.createElement('tr');
+    let badgeHtml = '';
+    if (r.status === '完全吻合') {
+      badgeHtml = '<span class="badge badge-success">完全吻合</span>';
+    } else if (r.status === '数量差异') {
+      tr.className = 'row-warning';
+      badgeHtml = '<span class="badge badge-danger">数量差异</span>';
+    } else if (r.status === '仅外账有') {
+      badgeHtml = '<span class="badge badge-warning">仅外账有</span>';
+    } else {
+      badgeHtml = '<span class="badge badge-info">仅库管有</span>';
+    }
+
+    const diffDisplay = r.diff_qty !== 0 ? (r.diff_qty > 0 ? `+${r.diff_qty}` : `${r.diff_qty}`) : '0';
+    const diffColor = r.diff_qty !== 0 ? (r.diff_qty > 0 ? '#fbbf24' : '#f87171') : '#94a3b8';
+
+    tr.innerHTML = `
+      <td style="font-family: monospace; color: #64748b;">${idx + 1}</td>
+      <td style="font-family: monospace; font-weight: 600; color: #38bdf8;">${escapeHtml(r.aux_code || '-')}</td>
+      <td style="font-weight: 600; color: #fff;">${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(r.spec || '-')}</td>
+      <td>${escapeHtml(r.factory || '-')}</td>
+      <td style="text-align: right; font-family: monospace;">${r.ext_qty}</td>
+      <td style="text-align: right; font-family: monospace; color: #94a3b8;">¥ ${formatMoney(r.ext_price)}</td>
+      <td style="text-align: right; font-family: monospace;">¥ ${formatMoney(r.ext_amount)}</td>
+      <td style="text-align: right; font-family: monospace;">${r.wh_qty}</td>
+      <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffColor};">${diffDisplay}</td>
+      <td style="text-align: center;">${badgeHtml}</td>
+    `;
+    tbody.appendChild(tr);
+  });
 }
 
 // ----------------------------------------------------
@@ -2156,6 +2769,39 @@ function initManualWorkspaceControls() {
 // ----------------------------------------------------
 // 8. 全局 Tab 切换与应用初始化
 // ----------------------------------------------------
+function setupAccountSystemSwitcher() {
+  const btnInternal = document.getElementById('btn-switch-internal');
+  const btnExternal = document.getElementById('btn-switch-external');
+  const groupInternal = document.getElementById('group-nav-internal');
+  const groupExternal = document.getElementById('group-nav-external');
+
+  const switchSystem = (sys) => {
+    state.currentSystem = sys;
+    if (sys === 'internal') {
+      if (btnInternal) btnInternal.classList.add('active');
+      if (btnExternal) btnExternal.classList.remove('active');
+      if (groupInternal) groupInternal.classList.remove('hidden');
+      if (groupExternal) groupExternal.classList.add('hidden');
+
+      const targetTab = state.activeInternalTab || 'tab-sales';
+      const targetTabEl = document.querySelector(`.nav-tab[data-tab="${targetTab}"]`);
+      if (targetTabEl) targetTabEl.click();
+    } else {
+      if (btnExternal) btnExternal.classList.add('active');
+      if (btnInternal) btnInternal.classList.remove('active');
+      if (groupExternal) groupExternal.classList.remove('hidden');
+      if (groupInternal) groupInternal.classList.add('hidden');
+
+      const targetTab = state.activeExternalTab || 'tab-ext-inbound';
+      const targetTabEl = document.querySelector(`.nav-tab[data-tab="${targetTab}"]`);
+      if (targetTabEl) targetTabEl.click();
+    }
+  };
+
+  if (btnInternal) btnInternal.onclick = () => switchSystem('internal');
+  if (btnExternal) btnExternal.onclick = () => switchSystem('external');
+}
+
 function setupTabNavigation() {
   const tabs = document.querySelectorAll('.nav-tab');
   const panels = document.querySelectorAll('.tab-panel');
@@ -2167,6 +2813,12 @@ function setupTabNavigation() {
 
       const targetId = tab.dataset.tab;
       state.activeTab = targetId;
+
+      if (tab.closest('#group-nav-internal')) {
+        state.activeInternalTab = targetId;
+      } else if (tab.closest('#group-nav-external')) {
+        state.activeExternalTab = targetId;
+      }
 
       tabs.forEach(t => t.classList.remove('active'));
       panels.forEach(p => p.classList.remove('active'));
@@ -2216,10 +2868,14 @@ function initHelpModal() {
 // 启动入口
 window.addEventListener('DOMContentLoaded', async () => {
   setupTabNavigation();
+  setupAccountSystemSwitcher();
   initHelpModal();
   initTabSales();
   initTabOutbound();
   initTabInbound();
+  initTabExtInbound();
+  initTabExtOutbound();
+  initTabExtCompare();
   initTabCompare();
   initTabConfig();
   initManualWorkspaceControls();
@@ -2228,3 +2884,4 @@ window.addEventListener('DOMContentLoaded', async () => {
   loadConfigData();
   triggerFileScan();
 });
+

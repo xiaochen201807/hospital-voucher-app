@@ -21,6 +21,7 @@ struct ScanResultData {
     inbound_files: Vec<ScannedItem>,
     ledger_files: Vec<ScannedItem>,
     template_files: Vec<ScannedItem>,
+    external_template_files: Vec<ScannedItem>,
     west_wh_files: Vec<ScannedItem>,
     tcm_wh_files: Vec<ScannedItem>,
     hc_wh_files: Vec<ScannedItem>,
@@ -183,6 +184,9 @@ fn scan_files(dir: Option<String>) -> Result<Value, String> {
             if name.contains("模板") {
                 res.template_files.push(item.clone());
             }
+            if name.contains("迁账") || name.contains("外账") {
+                res.external_template_files.push(item.clone());
+            }
             if name.contains("西药")
                 && (name.contains("库存") || name.contains("报表") || name.contains("房"))
             {
@@ -288,6 +292,68 @@ fn execute_inbound_voucher(
             voucher_no.as_deref(),
             cfg,
             confirmed_items.as_deref(),
+        )
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn execute_external_inbound_voucher(
+    app: tauri::AppHandle,
+    inbound: String,
+    template: String,
+    output: Option<String>,
+    date: Option<String>,
+    voucher_no: Option<String>,
+    config: Option<String>,
+) -> Result<Value, String> {
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::external::generate_external_inbound_voucher(
+            Path::new(&inbound),
+            Path::new(&template),
+            output.as_deref().map(Path::new),
+            date.as_deref(),
+            voucher_no.as_deref(),
+            Some(cfg),
+        )
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn execute_external_outbound_voucher(
+    app: tauri::AppHandle,
+    sales: String,
+    template: String,
+    output: Option<String>,
+    date: Option<String>,
+    voucher_no: Option<String>,
+    config: Option<String>,
+) -> Result<Value, String> {
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::external::generate_external_outbound_voucher(
+            Path::new(&sales),
+            Path::new(&template),
+            output.as_deref().map(Path::new),
+            date.as_deref(),
+            voucher_no.as_deref(),
+            Some(cfg),
+        )
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn execute_external_inventory_audit(
+    app: tauri::AppHandle,
+    template: String,
+    warehouse: String,
+    output: Option<String>,
+    config: Option<String>,
+) -> Result<Value, String> {
+    run_with_runtime_config(&app, config.as_deref(), |cfg| {
+        core::external::generate_external_inventory_audit(
+            Path::new(&template),
+            Path::new(&warehouse),
+            output.as_deref().map(Path::new),
+            Some(cfg),
         )
     })
 }
@@ -465,6 +531,9 @@ pub fn run() {
             search_ledger_candidates,
             execute_outbound_voucher,
             execute_inbound_voucher,
+            execute_external_inbound_voucher,
+            execute_external_outbound_voucher,
+            execute_external_inventory_audit,
             execute_inventory_audit,
             preview_inventory_audit_mapping,
             execute_inventory_audit_with_mapping,
@@ -545,5 +614,52 @@ mod tests {
             .find(|record| record.ledger_code == "1201_XY0014")
             .expect("审计结果应保留历史数量为 0 但金额非 0 的总账记录");
         assert_eq!(historical_balance.ledger_amt, 5.21);
+    }
+
+    #[test]
+    fn test_external_voucher_suite() {
+        let (cfg, _) = core::config::load_config(None);
+        let tmpl_path = project_file("表格迁账参考模板.xlsx");
+        let inbound_path = project_file("西药入库单.xlsx");
+        let sales_path = project_file("2026.8月西药销售表_已汇总.xlsx");
+        let wh_path = project_file("石家庄心理医院新西药房库存汇总报表2026831.xls");
+
+        // 1. 测试纯 Rust 外账入库
+        let in_res = core::external::generate_external_inbound_voucher(
+            Path::new(&inbound_path),
+            Path::new(&tmpl_path),
+            None,
+            Some("2026-08-31"),
+            Some("1"),
+            Some(&cfg),
+        ).expect("纯 Rust 外账入库调用必须成功");
+        assert!(in_res.is_balanced);
+        assert_eq!(in_res.diff, 0.0);
+        assert_eq!(in_res.total_debit, in_res.total_credit);
+        println!(">>> 纯 Rust 外账入库凭证测试通过: 借贷平衡 ¥{} == ¥{}", in_res.total_debit, in_res.total_credit);
+
+        // 2. 测试纯 Rust 外账出库
+        let out_res = core::external::generate_external_outbound_voucher(
+            Path::new(&sales_path),
+            Path::new(&tmpl_path),
+            None,
+            Some("2026-08-31"),
+            Some("2"),
+            Some(&cfg),
+        ).expect("纯 Rust 外账出库调用必须成功");
+        assert!(out_res.is_balanced);
+        assert_eq!(out_res.diff, 0.0);
+        assert_eq!(out_res.total_debit, out_res.total_credit);
+        println!(">>> 纯 Rust 外账出库凭证测试通过: 借贷平衡 ¥{} == ¥{}", out_res.total_debit, out_res.total_credit);
+
+        // 3. 测试纯 Rust 外账结存数比对
+        let cmp_res = core::external::generate_external_inventory_audit(
+            Path::new(&tmpl_path),
+            Path::new(&wh_path),
+            None,
+            Some(&cfg),
+        ).expect("纯 Rust 外账结存比对调用必须成功");
+        assert!(cmp_res.total_items > 0);
+        println!(">>> 纯 Rust 外账结存数比对测试通过: 品规数 {}, 吻合率 {}%", cmp_res.total_items, cmp_res.match_rate);
     }
 }

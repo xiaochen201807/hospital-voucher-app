@@ -24,6 +24,26 @@
           </div>
         </div>
 
+        <!-- 内外账左右顶层双系统切换器 -->
+        <div class="account-system-switcher" role="tablist" aria-label="会计系统切换">
+          <button id="btn-switch-internal" class="sys-switch-btn active" data-system="internal" title="切换至院内金蝶/HIS内账凭证核算">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+            <span>内账会计系统</span>
+          </button>
+          <button id="btn-switch-external" class="sys-switch-btn" data-system="external" title="切换至标准迁账/云财务外账凭证核算">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="2" y1="12" x2="22" y2="12" />
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+            </svg>
+            <span>外账财务系统</span>
+            <span class="sys-badge">新</span>
+          </button>
+        </div>
+
         <div class="header-actions">
           <button id="btn-quick-scan" class="btn btn-secondary btn-sm" title="扫描当前目录下的所有 Excel 候选文件">
             <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
@@ -53,60 +73,108 @@
       <div class="workspace-body">
         <!-- 侧边导航选项卡 -->
         <nav class="sidebar-nav">
-          <button class="nav-tab active" data-tab="tab-sales">
-            <div class="nav-icon">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <path d="M3 9h18M9 21V9" />
-              </svg>
-            </div>
-            <div class="nav-label">
-              <div class="nav-name">销售明细汇总</div>
-              <div class="nav-desc">多行去重与数量金额汇总</div>
-            </div>
-          </button>
+          <!-- 内账专属功能分组 -->
+          <div id="group-nav-internal" class="nav-system-group">
+            <button class="nav-tab active" data-tab="tab-sales">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M3 9h18M9 21V9" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">销售明细汇总</div>
+                <div class="nav-desc">多行去重与数量金额汇总</div>
+              </div>
+            </button>
 
-          <button class="nav-tab" data-tab="tab-inbound">
-            <div class="nav-icon">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
-                <path d="M12 2v14M18 10l-6 6-6-6" />
-                <rect x="3" y="16" width="18" height="6" rx="2" />
-              </svg>
-            </div>
-            <div class="nav-label">
-              <div class="nav-name">药房入库凭证</div>
-              <div class="nav-desc">西药/中药借贷双向审计</div>
-            </div>
-          </button>
+            <button class="nav-tab" data-tab="tab-inbound">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M12 2v14M18 10l-6 6-6-6" />
+                  <rect x="3" y="16" width="18" height="6" rx="2" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">药房入库凭证</div>
+                <div class="nav-desc">西药/中药借贷双向审计</div>
+              </div>
+            </button>
 
-          <button class="nav-tab" data-tab="tab-outbound">
-            <div class="nav-icon">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-                <polyline points="10 9 9 9 8 9" />
-              </svg>
-            </div>
-            <div class="nav-label">
-              <div class="nav-name">销售出库凭证</div>
-              <div class="nav-desc">使用入库后重新导出的总账并自动关联存货编码</div>
-            </div>
-          </button>
+            <button class="nav-tab" data-tab="tab-outbound">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="16" y1="13" x2="8" y2="13" />
+                  <line x1="16" y1="17" x2="8" y2="17" />
+                  <polyline points="10 9 9 9 8 9" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">销售出库凭证</div>
+                <div class="nav-desc">使用入库后重新导出的总账并自动关联存货编码</div>
+              </div>
+            </button>
 
-          <button class="nav-tab" data-tab="tab-compare">
-            <div class="nav-icon">
-              <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
-                <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
-              </svg>
-            </div>
-            <div class="nav-label">
-              <div class="nav-name">账实库存核对</div>
-              <div class="nav-desc">总账数量与三库智能比对</div>
-            </div>
-          </button>
+            <button class="nav-tab" data-tab="tab-compare">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">账实库存核对</div>
+                <div class="nav-desc">总账数量与三库智能比对</div>
+              </div>
+            </button>
+          </div>
 
+          <!-- 外账专属功能分组 -->
+          <div id="group-nav-external" class="nav-system-group hidden">
+            <button class="nav-tab" data-tab="tab-ext-inbound">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M9 11l3 3L22 4" />
+                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">外账入库凭证</div>
+                <div class="nav-desc">迁账16列 借1405/贷2202</div>
+              </div>
+            </button>
+
+            <button class="nav-tab" data-tab="tab-ext-outbound">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="16" y1="13" x2="8" y2="13" />
+                  <line x1="16" y1="17" x2="8" y2="17" />
+                  <polyline points="10 9 9 9 8 9" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">外账出库凭证</div>
+                <div class="nav-desc">成本结转 借5401/贷1405</div>
+              </div>
+            </button>
+
+            <button class="nav-tab" data-tab="tab-ext-compare">
+              <div class="nav-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                  <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                </svg>
+              </div>
+              <div class="nav-label">
+                <div class="nav-name">外账结存数比对</div>
+                <div class="nav-desc">辅助余额表 vs 库管实盘</div>
+              </div>
+            </button>
+          </div>
+
+          <!-- 通用全局设置 -->
           <button class="nav-tab" data-tab="tab-config">
             <div class="nav-icon">
               <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
@@ -912,6 +980,494 @@
                     <input type="text" id="override-val-input" class="form-input input-sm" placeholder="如: 1201_ZY9999 或留空" />
                     <button id="btn-add-override" class="btn btn-secondary btn-sm">添加</button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB: 外账入库凭证生成 -->
+          <section id="tab-ext-inbound" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">外账入库凭证生成 (迁账导入模板)</h2>
+                <p class="panel-desc">读取药品入库单，对照《表格迁账参考模板.xlsx》【辅助信息】中的供应商与存货字典，按供应商连续生成 1405 库存商品借方明细与 2202 应付账款贷方汇总。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-row">
+                  <div class="form-group col-4">
+                    <label class="form-label">记账日期（默认月末最后一天）</label>
+                    <input type="date" id="ext-inbound-date" class="form-input" />
+                  </div>
+                  <div class="form-group col-4">
+                    <label class="form-label">凭证字</label>
+                    <select id="ext-inbound-type" class="form-input">
+                      <option value="记" selected>记</option>
+                    </select>
+                  </div>
+                  <div class="form-group col-4">
+                    <label class="form-label">凭证号</label>
+                    <input type="number" id="ext-inbound-no" class="form-input" value="1" min="1" />
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>1. 药品入库单 (Excel，西药或中药)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-inbound-file" class="form-input" placeholder="请选择西药或中药药品入库单文件..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-inbound">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 外账参考模板 (表格迁账参考模板.xlsx)</span>
+                    <span class="label-tip">自动提取【辅助信息】中的供应商库与存货库</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-template-file" class="form-input" placeholder="请选择外账表格迁账参考模板..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-template">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 目标输出文件路径</span>
+                    <span class="label-tip">保留原模板所有工作表，精准覆盖【凭证】Sheet</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-output-file" class="form-input" value="表格迁账参考模板_西药入库_已生成.xlsx" placeholder="输入输出文件名..." />
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-ext-inbound" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="12" y1="18" x2="12" y2="12" />
+                      <line x1="9" y1="15" x2="15" y2="15" />
+                    </svg>
+                    <span>开始生成外账入库凭证</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 外账凭证结果显示卡片 -->
+            <div id="ext-inbound-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>外账入库凭证生成成功</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-ext-file" class="btn btn-secondary btn-sm">打开凭证 Excel</button>
+                  <button id="btn-show-ext-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-items">-</div>
+                  <div class="stat-label">入库药品 / 供应商数</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-ext-entries">-</div>
+                  <div class="stat-label">生成分录总行数</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-amt">-</div>
+                  <div class="stat-label">借贷总金额 (元)</div>
+                </div>
+                <div class="stat-card" id="card-ext-balance">
+                  <div class="stat-val" id="stat-ext-balance">-</div>
+                  <div class="stat-label">借贷平衡校验</div>
+                </div>
+                <div class="stat-card warning" id="card-ext-unmatched">
+                  <div class="stat-val" id="stat-ext-unmatched">-</div>
+                  <div class="stat-label">待补全存货编码</div>
+                </div>
+              </div>
+
+              <!-- 未匹配新药告警 -->
+              <div id="ext-unmatched-box" class="unmatched-box hidden">
+                <div class="unmatched-header">
+                  <div class="unmatched-title">
+                    <span class="badge badge-warning">提示</span>
+                    <span>以下药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）：</span>
+                  </div>
+                </div>
+                <div class="table-container">
+                  <table class="data-table" id="ext-unmatched-table">
+                    <thead>
+                      <tr>
+                        <th>行号</th>
+                        <th>药品名称</th>
+                        <th>规格</th>
+                        <th>生产厂家</th>
+                        <th>数量</th>
+                        <th>进价金额</th>
+                        <th>供货商</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- 凭证分录预览明细表 -->
+              <div class="preview-box" style="margin-top: 16px;">
+                <div class="unmatched-header" style="margin-bottom: 10px;">
+                  <div class="unmatched-title">
+                    <span class="badge badge-info">分录明细预览</span>
+                    <span id="ext-preview-count-tip">共 0 行凭证分录</span>
+                  </div>
+                  <div class="filter-pills" id="ext-preview-filters">
+                    <button class="btn btn-xs filter-pill active" data-filter="ALL">全部 (<span id="cnt-ext-all">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="DEBIT">借方·库存商品 (<span id="cnt-ext-debit">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="CREDIT">贷方·应付账款 (<span id="cnt-ext-credit">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="UNMATCHED">⚠️ 待补全 (<span id="cnt-ext-unmatched">0</span>)</button>
+                  </div>
+                </div>
+                <div class="table-container" style="max-height: 480px; overflow-y: auto;">
+                  <table class="data-table" id="ext-preview-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 50px;">序号</th>
+                        <th>记账日期</th>
+                        <th style="width: 50px;">字</th>
+                        <th style="width: 50px;">号</th>
+                        <th>摘要</th>
+                        <th>科目代码</th>
+                        <th>科目名称</th>
+                        <th style="text-align: right;">借方金额</th>
+                        <th style="text-align: right;">贷方金额</th>
+                        <th style="text-align: right;">数量</th>
+                        <th>辅助编码</th>
+                        <th>辅助名称</th>
+                        <th style="text-align: center;">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB: 外账出库凭证生成 (销售成本结转) -->
+          <section id="tab-ext-outbound" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">外账出库凭证生成 (销售成本结转)</h2>
+                <p class="panel-desc">读取销售汇总表，对照《表格迁账参考模板.xlsx》【辅助信息】中的存货字典提取 5 位编码，借记 5401 主营业务成本，贷记 1405 库存商品明细。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-row">
+                  <div class="form-group col-4">
+                    <label class="form-label">记账日期（默认月末最后一天）</label>
+                    <input type="date" id="ext-outbound-date" class="form-input" />
+                  </div>
+                  <div class="form-group col-4">
+                    <label class="form-label">凭证字</label>
+                    <select id="ext-outbound-type" class="form-input">
+                      <option value="记" selected>记</option>
+                    </select>
+                  </div>
+                  <div class="form-group col-4">
+                    <label class="form-label">凭证号</label>
+                    <input type="number" id="ext-outbound-no" class="form-input" value="1" min="1" />
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>1. 销售明细汇总表 (Excel，已汇总或原始销售表)</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-outbound-sales-file" class="form-input" placeholder="请选择西药销售明细汇总表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-outbound-sales">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 外账参考模板 (表格迁账参考模板.xlsx)</span>
+                    <span class="label-tip">自动提取【辅助信息】中的 5 位存货编码与【辅助余额表】成本单价</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-outbound-template-file" class="form-input" placeholder="请选择外账表格迁账参考模板..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-outbound-template">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 目标输出文件路径</span>
+                    <span class="label-tip">保留原模板所有工作表，精准填制出库成本【凭证】Sheet</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-outbound-output-file" class="form-input" value="表格迁账参考模板_西药出库_已生成.xlsx" placeholder="输入输出文件名..." />
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-ext-outbound" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                    </svg>
+                    <span>开始生成外账出库凭证</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 外账出库凭证结果显示卡片 -->
+            <div id="ext-outbound-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>外账出库凭证生成成功</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-ext-outbound-file" class="btn btn-secondary btn-sm">打开凭证 Excel</button>
+                  <button id="btn-show-ext-outbound-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-outbound-items">-</div>
+                  <div class="stat-label">出库销售药品数</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-ext-outbound-entries">-</div>
+                  <div class="stat-label">生成分录总行数</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-outbound-amt">-</div>
+                  <div class="stat-label">出库成本总额 (元)</div>
+                </div>
+                <div class="stat-card" id="card-ext-outbound-balance">
+                  <div class="stat-val" id="stat-ext-outbound-balance">-</div>
+                  <div class="stat-label">借贷平衡校验</div>
+                </div>
+                <div class="stat-card warning" id="card-ext-outbound-unmatched">
+                  <div class="stat-val" id="stat-ext-outbound-unmatched">-</div>
+                  <div class="stat-label">待补全存货编码</div>
+                </div>
+              </div>
+
+              <!-- 未匹配新药告警 -->
+              <div id="ext-outbound-unmatched-box" class="unmatched-box hidden">
+                <div class="unmatched-header">
+                  <div class="unmatched-title">
+                    <span class="badge badge-warning">提示</span>
+                    <span>以下销售药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）：</span>
+                  </div>
+                </div>
+                <div class="table-container">
+                  <table class="data-table" id="ext-outbound-unmatched-table">
+                    <thead>
+                      <tr>
+                        <th>行号</th>
+                        <th>药品名称</th>
+                        <th>规格</th>
+                        <th>生产厂家</th>
+                        <th>销售数量</th>
+                        <th>进价金额</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- 凭证分录预览明细表 -->
+              <div class="preview-box" style="margin-top: 16px;">
+                <div class="unmatched-header" style="margin-bottom: 10px;">
+                  <div class="unmatched-title">
+                    <span class="badge badge-info">出库分录明细预览</span>
+                    <span id="ext-outbound-preview-count-tip">共 0 行凭证分录</span>
+                  </div>
+                  <div class="filter-pills" id="ext-outbound-preview-filters">
+                    <button class="btn btn-xs filter-pill active" data-filter="ALL">全部 (<span id="cnt-ext-outbound-all">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="DEBIT">借方·主营业务成本 (<span id="cnt-ext-outbound-debit">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="CREDIT">贷方·库存商品 (<span id="cnt-ext-outbound-credit">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="UNMATCHED">⚠️ 待补全 (<span id="cnt-ext-outbound-unmatched">0</span>)</button>
+                  </div>
+                </div>
+                <div class="table-container" style="max-height: 480px; overflow-y: auto;">
+                  <table class="data-table" id="ext-outbound-preview-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 50px;">序号</th>
+                        <th>记账日期</th>
+                        <th style="width: 50px;">字</th>
+                        <th style="width: 50px;">号</th>
+                        <th>摘要</th>
+                        <th>科目代码</th>
+                        <th>科目名称</th>
+                        <th style="text-align: right;">借方金额</th>
+                        <th style="text-align: right;">贷方金额</th>
+                        <th style="text-align: right;">数量</th>
+                        <th>辅助编码</th>
+                        <th>辅助名称</th>
+                        <th style="text-align: center;">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB: 外账结存数比对 (辅助余额表 vs 库管实盘) -->
+          <section id="tab-ext-compare" class="tab-panel">
+            <div class="panel-header">
+              <div class="panel-title-group">
+                <h2 class="panel-title">外账结存数与库管实物智能比对</h2>
+                <p class="panel-desc">读取《表格迁账参考模板.xlsx》【辅助余额表】1405 存货结存数据，与库管在库报表进行四维智能比对（完全吻合、数量差异、仅外账、仅库管）。</p>
+              </div>
+            </div>
+
+            <div class="card-grid">
+              <div class="form-card">
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>1. 外账参考模板 (表格迁账参考模板.xlsx)</span>
+                    <span class="label-tip">自动读取【辅助余额表】中 1405 科目的期初/结存数量与金额</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-compare-template-file" class="form-input" placeholder="请选择外账表格迁账参考模板..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-template">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>2. 药库在库实盘汇总报表 (Excel，西药/中药/耗材)</span>
+                    <span class="label-tip">读取药房库管系统导出的现存量汇总报表</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-compare-wh-file" class="form-input" placeholder="请选择西药房或中药房库存汇总报表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-wh">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 目标核对分析报告路径</span>
+                    <span class="label-tip">生成包含看板汇总与明细对账底稿的标准 Excel 报告</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-compare-output-file" class="form-input" value="外账账实库存核对分析报告.xlsx" placeholder="输入输出分析报告文件名..." />
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button id="btn-run-ext-compare" class="btn btn-primary btn-lg">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                      <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                    </svg>
+                    <span>开始智能比对外账结存数</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 外账结存数比对结果卡片 -->
+            <div id="ext-compare-result" class="result-container hidden">
+              <div class="result-header">
+                <div class="result-title">
+                  <span class="icon-success">✓</span>
+                  <span>外账账实库存核对完成</span>
+                </div>
+                <div class="result-actions">
+                  <button id="btn-open-ext-compare-file" class="btn btn-secondary btn-sm">打开分析报告 Excel</button>
+                  <button id="btn-show-ext-compare-folder" class="btn btn-outline btn-sm">在文件夹中显示</button>
+                </div>
+              </div>
+
+              <div class="stat-cards">
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-compare-total">-</div>
+                  <div class="stat-label">比对品规总数</div>
+                </div>
+                <div class="stat-card" style="border-top: 3px solid var(--accent-success);">
+                  <div class="stat-val" style="color: var(--accent-success);" id="stat-ext-compare-equal">-</div>
+                  <div class="stat-label">完全吻合品种</div>
+                </div>
+                <div class="stat-card warning" id="card-ext-compare-diff">
+                  <div class="stat-val" id="stat-ext-compare-diff">-</div>
+                  <div class="stat-label">数量存在差异</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-compare-ext-only">-</div>
+                  <div class="stat-label">仅外账有</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-val" id="stat-ext-compare-wh-only">-</div>
+                  <div class="stat-label">仅库管有</div>
+                </div>
+                <div class="stat-card highlight">
+                  <div class="stat-val" id="stat-ext-compare-rate">-%</div>
+                  <div class="stat-label">账实吻合率</div>
+                </div>
+              </div>
+
+              <!-- 比对明细预览表格 -->
+              <div class="preview-box" style="margin-top: 16px;">
+                <div class="unmatched-header" style="margin-bottom: 10px;">
+                  <div class="unmatched-title">
+                    <span class="badge badge-info">结存比对明细</span>
+                    <span id="ext-compare-count-tip">共 0 条核对记录</span>
+                  </div>
+                  <div class="filter-pills" id="ext-compare-filters">
+                    <button class="btn btn-xs filter-pill active" data-filter="ALL">全部 (<span id="cnt-ext-cmp-all">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="EQUAL">完全吻合 (<span id="cnt-ext-cmp-equal">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="DIFF">⚠️ 差异 (<span id="cnt-ext-cmp-diff">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="EXT_ONLY">仅外账有 (<span id="cnt-ext-cmp-ext">0</span>)</button>
+                    <button class="btn btn-xs filter-pill" data-filter="WH_ONLY">仅库管有 (<span id="cnt-ext-cmp-wh">0</span>)</button>
+                  </div>
+                </div>
+                <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+                  <table class="data-table" id="ext-compare-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 50px;">序号</th>
+                        <th>外账编码</th>
+                        <th>药品标准名称</th>
+                        <th>规格型号</th>
+                        <th>生产厂家</th>
+                        <th style="text-align: right;">外账数量</th>
+                        <th style="text-align: right;">外账单价</th>
+                        <th style="text-align: right;">外账金额</th>
+                        <th style="text-align: right;">库管数量</th>
+                        <th style="text-align: right;">差异数量</th>
+                        <th style="text-align: center;">核对状态</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
                 </div>
               </div>
             </div>
