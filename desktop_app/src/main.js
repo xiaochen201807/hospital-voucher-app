@@ -58,6 +58,8 @@ const state = {
   previewSearch: '',
   outboundManualMappings: {},
   inboundManualMappings: {},
+  extInboundManualMappings: {},
+  extOutboundManualMappings: {},
   manualSearch: {
     outbound: {
       ledgerPath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
@@ -69,6 +71,14 @@ const state = {
     },
     audit: {
       ledgerPath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
+      selectedLabels: {}, selectedCandidates: {}
+    },
+    extInbound: {
+      sourcePath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
+      selectedLabels: {}, selectedCandidates: {}
+    },
+    extOutbound: {
+      sourcePath: '', queries: {}, results: {}, defaults: {}, requestIds: {},
       selectedLabels: {}, selectedCandidates: {}
     }
   }
@@ -251,7 +261,7 @@ async function invokeWithLoading(command, args, options = {}) {
   }
 }
 
-function resetManualSearchContext(kind, ledgerPath = '') {
+function resetManualSearchContext(kind, sourcePath = '') {
   if (scheduleManualCandidateSearch.timers) {
     for (const key of scheduleManualCandidateSearch.timers.keys()) {
       if (key.startsWith(`${kind}:`)) {
@@ -261,7 +271,8 @@ function resetManualSearchContext(kind, ledgerPath = '') {
     }
   }
   state.manualSearch[kind] = {
-    ledgerPath,
+    ledgerPath: sourcePath,
+    sourcePath,
     queries: {},
     results: {},
     defaults: {},
@@ -364,10 +375,21 @@ function findManualCandidate(kind, itemId, code) {
   ].find(candidate => candidate?.code === code) || null;
 }
 
+function isExternalManualKind(kind) {
+  return kind === 'extInbound' || kind === 'extOutbound';
+}
+
+function manualCandidateEmptyLabel(kind) {
+  if (kind === 'audit') return '-- 手动选择科目 --';
+  if (isExternalManualKind(kind)) return '-- 选择外账存货编码 --';
+  return '-- 选择财务存货科目 --';
+}
+
 function scheduleManualCandidateSearch(input, picker, kind, selectedCode = '', category = '') {
   const itemId = String(input.dataset.id);
   const context = state.manualSearch[kind];
   if (!context) return;
+  const isExternalInventorySearch = isExternalManualKind(kind);
   const query = input.value.trim();
   context.queries[itemId] = query;
   context.requestIds[itemId] = (context.requestIds[itemId] || 0) + 1;
@@ -384,42 +406,51 @@ function scheduleManualCandidateSearch(input, picker, kind, selectedCode = '', c
   const selected = selectedCode || picker?.dataset.selectedCode || '';
   const pickerOptions = {
     includeNone: kind === 'audit',
-    emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+    emptyLabel: manualCandidateEmptyLabel(kind),
     selectedCandidate: context.selectedCandidates[itemId]
   };
   if (!query) {
     delete context.results[itemId];
-    input.title = '输入品名、规格或科目编码进行模糊搜索';
+    input.title = isExternalInventorySearch
+      ? '输入品名、规格或五位辅助编码进行搜索'
+      : '输入品名、规格或科目编码进行模糊搜索';
     input.removeAttribute('aria-busy');
     renderCandidateOptions(picker, context.defaults[itemId] || [], selected, pickerOptions);
     openCandidateOptions(picker);
     return;
   }
-  if (!context.ledgerPath) {
+  const sourcePath = context.sourcePath || context.ledgerPath;
+  if (!sourcePath) {
     renderCandidateOptions(picker, [], selected, {
       ...pickerOptions,
-      emptyLabel: '尚未加载总账，无法搜索'
+      emptyLabel: isExternalInventorySearch ? '尚未加载外账参考模板，无法搜索' : '尚未加载总账，无法搜索'
     });
     openCandidateOptions(picker);
     return;
   }
 
-  input.title = '正在搜索总账科目…';
+  input.title = isExternalInventorySearch ? '正在搜索外账存货编码…' : '正在搜索总账科目…';
   input.setAttribute('aria-busy', 'true');
   renderCandidateOptions(picker, [], selected, {
     ...pickerOptions,
-    emptyLabel: '正在搜索科目…'
+    emptyLabel: isExternalInventorySearch ? '正在搜索外账存货…' : '正在搜索科目…'
   });
   openCandidateOptions(picker);
 
   const timer = setTimeout(async () => {
     try {
-      const result = await invoke('search_ledger_candidates', {
-        ledger: context.ledgerPath,
-        query,
-        limit: 80,
-        category: category || null
-      });
+      const result = isExternalInventorySearch
+        ? await invoke('search_external_inventory_candidates', {
+          template: sourcePath,
+          query,
+          limit: 80
+        })
+        : await invoke('search_ledger_candidates', {
+          ledger: sourcePath,
+          query,
+          limit: 80,
+          category: category || null
+        });
       if (
         state.manualSearch[kind] !== context ||
         context.requestIds[itemId] !== requestId ||
@@ -470,7 +501,7 @@ function bindManualCandidatePickers(table, kind, getSelectedCode, getCategory, o
       const selected = getSelectedCode(itemId) || picker.dataset.selectedCode || '';
       renderCandidateOptions(picker, getManualCandidates(kind, itemId), selected, {
         includeNone: kind === 'audit',
-        emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+        emptyLabel: manualCandidateEmptyLabel(kind),
         selectedCandidate: context.selectedCandidates[itemId]
       });
       openCandidateOptions(picker);
@@ -527,7 +558,7 @@ function bindManualCandidatePickers(table, kind, getSelectedCode, getCategory, o
           : '';
         renderCandidateOptions(picker, context.defaults[itemId] || [], normalizedCode, {
           includeNone: kind === 'audit',
-          emptyLabel: kind === 'audit' ? '-- 手动选择科目 --' : '-- 选择财务存货科目 --',
+          emptyLabel: manualCandidateEmptyLabel(kind),
           selectedCandidate: context.selectedCandidates[itemId]
         });
         closeCandidateOptions(picker);
@@ -1043,6 +1074,9 @@ function renderVoucherCandidateSelect(item, mappings, kind) {
   const searchValue = context.queries[itemId] || '';
   const inputValue = searchValue || (selectedCode ? selectedLabel : '');
   const optionsId = `${kind}-candidate-options-${itemId}`;
+  const searchHint = isExternalManualKind(kind)
+    ? '输入品名、规格或五位辅助编码进行搜索'
+    : '输入品名、规格或科目编码进行模糊搜索';
 
   return `
     <div class="manual-candidate-picker" data-id="${escapeHtml(item.id)}">
@@ -1051,8 +1085,8 @@ function renderVoucherCandidateSelect(item, mappings, kind) {
         data-id="${escapeHtml(item.id)}"
         type="search"
         value="${escapeHtml(inputValue)}"
-        placeholder="模糊搜索品名/规格/编码"
-        title="输入品名、规格或科目编码进行模糊搜索"
+        placeholder="${escapeHtml(isExternalManualKind(kind) ? '搜索品名/规格/五位编码' : '模糊搜索品名/规格/编码')}"
+        title="${escapeHtml(searchHint)}"
         role="combobox"
         aria-autocomplete="list"
         aria-controls="${escapeHtml(optionsId)}"
@@ -1071,6 +1105,15 @@ function collectConfirmedLedgerMappings(mappings) {
       ledger_code: String(ledgerCode || '').trim()
     }))
     .filter(item => Number.isInteger(item.id) && item.id >= 0 && item.ledger_code);
+}
+
+function collectConfirmedExternalMappings(mappings) {
+  return Object.entries(mappings || {})
+    .map(([rowIndex, auxCode]) => ({
+      row_index: Number(rowIndex),
+      aux_code: String(auxCode || '').trim()
+    }))
+    .filter(item => Number.isInteger(item.row_index) && item.row_index > 0 && item.aux_code);
 }
 
 function updateVoucherManualButton(buttonId, mappings, visible) {
@@ -1370,6 +1413,7 @@ function initTabExtInbound() {
   const inDate = document.getElementById('ext-inbound-date');
   const inNo = document.getElementById('ext-inbound-no');
   const btnRun = document.getElementById('btn-run-ext-inbound');
+  const btnManualRun = document.getElementById('btn-rerun-ext-inbound-manual');
 
   bindFilePicker('btn-browse-ext-inbound', inInbound, '选择药品入库单 (西药或中药)');
   bindFilePicker('btn-browse-ext-template', inTemplate, '选择外账表格迁账参考模板');
@@ -1377,7 +1421,7 @@ function initTabExtInbound() {
   setupDropzone(inInbound, inInbound.closest('.file-input-wrapper'));
   setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
 
-  btnRun.onclick = async () => {
+  const generateExternalInbound = async (confirmedItems, successMessage) => {
     const inbound = inInbound.value.trim();
     const template = inTemplate.value.trim();
     const output = inOutput.value.trim() || '表格迁账参考模板_西药入库_已生成.xlsx';
@@ -1387,12 +1431,15 @@ function initTabExtInbound() {
     if (!inbound) return showToast('请指定药品入库单文件', 'warning');
     if (!template) return showToast('请指定外账迁账参考模板', 'warning');
 
+    resetManualSearchContext('extInbound', template);
+
     const res = await invokeWithLoading('execute_external_inbound_voucher', {
       inbound,
       template,
       output,
       date: dateVal,
       voucherNo,
+      confirmedItems: confirmedItems || null,
       config: null
     }, {
       loadingMessage: '正在解析入库单、匹配外账5位存货与供应商编码并生成凭证...',
@@ -1405,7 +1452,26 @@ function initTabExtInbound() {
     state.extInboundData = res;
     state.extInboundFilter = 'ALL';
     renderExtInboundResult(res);
-    showToast('外账入库凭证生成成功！', 'success');
+    showToast(successMessage, 'success');
+  };
+
+  btnRun.onclick = async () => {
+    state.extInboundManualMappings = {};
+    await generateExternalInbound(null, '外账入库凭证生成成功！');
+  };
+
+  if (btnManualRun) {
+    btnManualRun.onclick = async () => {
+      const confirmedItems = collectConfirmedExternalMappings(state.extInboundManualMappings);
+      if (confirmedItems.length === 0) {
+        showToast('请先在未匹配列表中选择至少一个外账存货编码', 'warning');
+        return;
+      }
+      await generateExternalInbound(
+        confirmedItems,
+        `已按 ${confirmedItems.length} 项手工匹配重新生成外账入库凭证！`
+      );
+    };
   };
 
   const btnOpen = document.getElementById('btn-open-ext-file');
@@ -1474,6 +1540,13 @@ function renderExtInboundResult(data) {
   if (unmatchedList.length > 0) {
     unmatchedBox.classList.remove('hidden');
     unmatchedList.forEach(d => {
+      const manualItem = {
+        ...d,
+        id: d.id ?? d.row_index,
+        target_name: d.name,
+        in_price: d.amount,
+        candidates: Array.isArray(d.candidates) ? d.candidates : []
+      };
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-family: monospace;">${d.row_index}</td>
@@ -1483,11 +1556,33 @@ function renderExtInboundResult(data) {
         <td style="font-family: monospace;">${d.qty}</td>
         <td style="font-family: monospace; color: #fbbf24;">¥ ${formatMoney(d.amount)}</td>
         <td>${escapeHtml(d.supplier || '-')}</td>
+        <td>
+          <div class="manual-match-cell">
+            ${renderVoucherCandidateSelect(manualItem, state.extInboundManualMappings, 'extInbound')}
+          </div>
+        </td>
       `;
       tbodyUnmatched.appendChild(tr);
     });
+
+    bindVoucherManualSelectors(
+      'ext-unmatched-table',
+      'extInboundManualMappings',
+      'btn-rerun-ext-inbound-manual',
+      'extInbound'
+    );
+    updateVoucherManualButton(
+      'btn-rerun-ext-inbound-manual',
+      state.extInboundManualMappings,
+      true
+    );
+
+    document.getElementById('btn-copy-ext-unmatched').onclick = () => copyUnmatchedToClipboard(unmatchedList);
+    document.getElementById('btn-export-ext-unmatched').onclick = () => exportUnmatchedToCsv(unmatchedList, '外账入库未匹配药品清单.csv');
   } else {
     unmatchedBox.classList.add('hidden');
+    closeManualWorkspace(unmatchedBox);
+    updateVoucherManualButton('btn-rerun-ext-inbound-manual', state.extInboundManualMappings, false);
   }
 
   // 未匹配供应商清单：供应商编码为空会影响 2202 贷方辅助核算，必须单独提示。
@@ -1582,6 +1677,7 @@ function initTabExtOutbound() {
   const inDate = document.getElementById('ext-outbound-date');
   const inNo = document.getElementById('ext-outbound-no');
   const btnRun = document.getElementById('btn-run-ext-outbound');
+  const btnManualRun = document.getElementById('btn-rerun-ext-outbound-manual');
 
   bindFilePicker('btn-browse-ext-outbound-sales', inSales, '选择销售明细汇总表');
   bindFilePicker('btn-browse-ext-outbound-template', inTemplate, '选择外账迁账参考模板');
@@ -1596,7 +1692,7 @@ function initTabExtOutbound() {
     inDate.value = lastDay.toISOString().split('T')[0];
   }
 
-  btnRun.onclick = async () => {
+  const generateExternalOutbound = async (confirmedItems, successMessage) => {
     const sales = inSales.value.trim();
     const template = inTemplate.value.trim();
     const output = inOutput.value.trim() || '表格迁账参考模板_西药出库_已生成.xlsx';
@@ -1606,12 +1702,15 @@ function initTabExtOutbound() {
     if (!sales) return showToast('请指定销售明细汇总表文件', 'warning');
     if (!template) return showToast('请指定外账迁账参考模板', 'warning');
 
+    resetManualSearchContext('extOutbound', template);
+
     const res = await invokeWithLoading('execute_external_outbound_voucher', {
       sales,
       template,
       output,
       date: dateVal,
       voucherNo,
+      confirmedItems: confirmedItems || null,
       config: null
     }, {
       loadingMessage: '正在解析销售汇总、匹配外账5位存货编码并生成成本结转凭证...',
@@ -1624,7 +1723,26 @@ function initTabExtOutbound() {
     state.extOutboundData = res;
     state.extOutboundFilter = 'ALL';
     renderExtOutboundResult(res);
-    showToast('外账出库结转凭证生成成功！', 'success');
+    showToast(successMessage, 'success');
+  };
+
+  btnRun.onclick = async () => {
+    state.extOutboundManualMappings = {};
+    await generateExternalOutbound(null, '外账出库结转凭证生成成功！');
+  };
+
+  if (btnManualRun) {
+    btnManualRun.onclick = async () => {
+      const confirmedItems = collectConfirmedExternalMappings(state.extOutboundManualMappings);
+      if (confirmedItems.length === 0) {
+        showToast('请先在未匹配列表中选择至少一个外账存货编码', 'warning');
+        return;
+      }
+      await generateExternalOutbound(
+        confirmedItems,
+        `已按 ${confirmedItems.length} 项手工匹配重新生成外账出库凭证！`
+      );
+    };
   };
 
   const btnOpen = document.getElementById('btn-open-ext-outbound-file');
@@ -1691,6 +1809,13 @@ function renderExtOutboundResult(data) {
   if (unmatchedList.length > 0) {
     unmatchedBox.classList.remove('hidden');
     unmatchedList.forEach(d => {
+      const manualItem = {
+        ...d,
+        id: d.id ?? d.row_index,
+        target_name: d.name,
+        in_price: d.amount,
+        candidates: Array.isArray(d.candidates) ? d.candidates : []
+      };
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-family: monospace;">${d.row_index}</td>
@@ -1699,11 +1824,33 @@ function renderExtOutboundResult(data) {
         <td>${escapeHtml(d.factory || '-')}</td>
         <td style="font-family: monospace;">${d.qty}</td>
         <td style="font-family: monospace; color: #fbbf24;">¥ ${formatMoney(d.amount)}</td>
+        <td>
+          <div class="manual-match-cell">
+            ${renderVoucherCandidateSelect(manualItem, state.extOutboundManualMappings, 'extOutbound')}
+          </div>
+        </td>
       `;
       tbodyUnmatched.appendChild(tr);
     });
+
+    bindVoucherManualSelectors(
+      'ext-outbound-unmatched-table',
+      'extOutboundManualMappings',
+      'btn-rerun-ext-outbound-manual',
+      'extOutbound'
+    );
+    updateVoucherManualButton(
+      'btn-rerun-ext-outbound-manual',
+      state.extOutboundManualMappings,
+      true
+    );
+
+    document.getElementById('btn-copy-ext-outbound-unmatched').onclick = () => copyUnmatchedToClipboard(unmatchedList);
+    document.getElementById('btn-export-ext-outbound-unmatched').onclick = () => exportUnmatchedToCsv(unmatchedList, '外账出库未匹配药品清单.csv');
   } else {
     unmatchedBox.classList.add('hidden');
+    closeManualWorkspace(unmatchedBox);
+    updateVoucherManualButton('btn-rerun-ext-outbound-manual', state.extOutboundManualMappings, false);
   }
 
   // 计数提示

@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::core::models::LedgerCandidateOption;
+
 /// 归一化文本：去除所有空白字符，统一全角半角括号
 pub fn normalize_text(text: &str) -> String {
     let s = text.trim();
@@ -101,6 +103,7 @@ pub struct ExternalVoucherRow {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExternalUnmatchedDrug {
+    pub id: usize,
     pub row_index: usize,
     pub name: String,
     pub factory: String,
@@ -108,6 +111,17 @@ pub struct ExternalUnmatchedDrug {
     pub qty: f64,
     pub amount: f64,
     pub supplier: Option<String>,
+    pub candidates: Vec<LedgerCandidateOption>,
+}
+
+/// 外账凭证生成时由前端确认的人工存货辅助编码。
+///
+/// `row_index` 使用原始入库单/销售表中的 Excel 行号，因此同一药品即使在
+/// 不同来源行出现，也不会因为名称相同而误覆盖另一行的人工选择。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConfirmedExternalInventoryMapping {
+    pub row_index: usize,
+    pub aux_code: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -619,6 +633,151 @@ fn match_external_supplier_code(
     }
 }
 
+fn external_candidate_option(
+    item: &ExternalInventoryItem,
+    template_data: &ExternalTemplateData,
+) -> LedgerCandidateOption {
+    let (price, qty, amount) = template_data
+        .balance_by_code
+        .get(&item.code)
+        .cloned()
+        .unwrap_or((0.0, 0.0, 0.0));
+
+    LedgerCandidateOption {
+        code: item.code.clone(),
+        name: item.name.clone(),
+        spec: item.spec.clone(),
+        qty,
+        price,
+        amount,
+    }
+}
+
+fn external_candidate_score(query: &str, item: &ExternalInventoryItem) -> i32 {
+    let normalized_query = normalize_text(query);
+    if normalized_query.is_empty() {
+        return 0;
+    }
+
+    let clean_query = clean_drug_name(&normalized_query);
+    let mut score = 0;
+
+    if item.code == normalized_query {
+        score += 200;
+    } else if item.code.contains(&normalized_query) {
+        score += 120;
+    }
+
+    if item.norm_name == normalized_query || item.clean_name == clean_query {
+        score += 160;
+    } else if item.norm_name.contains(&normalized_query)
+        || normalized_query.contains(&item.norm_name)
+        || item.clean_name.contains(&clean_query)
+        || clean_query.contains(&item.clean_name)
+    {
+        score += 100;
+    }
+
+    if !item.norm_spec.is_empty()
+        && (item.norm_spec.contains(&normalized_query)
+            || normalized_query.contains(&item.norm_spec))
+    {
+        score += 60;
+    }
+
+    score
+}
+
+/// 在当前外账模板的【辅助信息】存货字典中搜索人工匹配候选。
+///
+/// 外账使用的是模板内的五位辅助编码，不依赖内账数量金额总账，因此单独
+/// 提供搜索入口，且候选编码全部来自当前模板，避免把内账编码误带入外账。
+pub fn search_external_inventory_candidates(
+    template_path: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<LedgerCandidateOption>, String> {
+    let template_data = load_external_template(template_path)?;
+    let mut scored: Vec<(i32, &ExternalInventoryItem)> = template_data
+        .inventory_items
+        .iter()
+        .filter_map(|item| {
+            let score = external_candidate_score(query, item);
+            (score > 0).then_some((score, item))
+        })
+        .collect();
+
+    scored.sort_by(|(score_a, item_a), (score_b, item_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| item_a.code.cmp(&item_b.code))
+            .then_with(|| item_a.name.cmp(&item_b.name))
+    });
+
+    Ok(scored
+        .into_iter()
+        .take(limit.max(1).min(200))
+        .map(|(_, item)| external_candidate_option(item, &template_data))
+        .collect())
+}
+
+fn build_external_inventory_candidates(
+    name: &str,
+    spec: &str,
+    factory: &str,
+    template_data: &ExternalTemplateData,
+) -> Vec<LedgerCandidateOption> {
+    let factory_query = normalize_text(factory);
+    let mut scored: Vec<(i32, &ExternalInventoryItem)> = template_data
+        .inventory_items
+        .iter()
+        .filter_map(|item| {
+            let mut score = external_candidate_score(name, item);
+            if !spec.trim().is_empty()
+                && inventory_spec_matches(&normalize_text(spec), &item.norm_spec)
+            {
+                score += 50;
+            }
+            if !factory_query.is_empty() && item.norm_name.contains(&factory_query) {
+                score += 20;
+            }
+            (score > 0).then_some((score, item))
+        })
+        .collect();
+
+    scored.sort_by(|(score_a, item_a), (score_b, item_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| item_a.code.cmp(&item_b.code))
+            .then_with(|| item_a.name.cmp(&item_b.name))
+    });
+
+    scored
+        .into_iter()
+        .take(25)
+        .map(|(_, item)| external_candidate_option(item, template_data))
+        .collect()
+}
+
+fn find_confirmed_external_inventory_match(
+    row_index: usize,
+    confirmed_mappings: Option<&[ConfirmedExternalInventoryMapping]>,
+    template_data: &ExternalTemplateData,
+) -> Option<(String, String)> {
+    let mapping = confirmed_mappings?
+        .iter()
+        .find(|mapping| mapping.row_index == row_index)?;
+    let code = mapping.aux_code.trim();
+    if code.is_empty() {
+        return None;
+    }
+
+    template_data
+        .inventory_by_code
+        .get(code)
+        .map(|item| (item.code.clone(), item.name.clone()))
+}
+
 // ----------------------------------------------------
 // 3. 外账入库凭证生成 (纯 Rust 原生实现)
 // ----------------------------------------------------
@@ -630,6 +789,7 @@ pub fn generate_external_inbound_voucher(
     custom_date: Option<&str>,
     voucher_no: Option<&str>,
     _config: Option<&ConfigData>,
+    confirmed_mappings: Option<&[ConfirmedExternalInventoryMapping]>,
 ) -> Result<ExternalInboundResult, String> {
     let template_data = load_external_template(template_path)?;
     let factory_abbr = get_merged_factory_abbr_map(_config);
@@ -774,16 +934,25 @@ pub fn generate_external_inbound_voucher(
             supplier_sum_cents += cents;
             total_debit_cents += cents;
 
-            let (aux_code, aux_name, is_unmatched) = match match_external_inventory_code(
-                &item.name,
-                &item.spec,
-                &item.factory,
-                &template_data.inventory_items,
-                &factory_abbr,
-            ) {
+            let matched = find_confirmed_external_inventory_match(
+                item.row_no,
+                confirmed_mappings,
+                &template_data,
+            )
+            .or_else(|| {
+                match_external_inventory_code(
+                    &item.name,
+                    &item.spec,
+                    &item.factory,
+                    &template_data.inventory_items,
+                    &factory_abbr,
+                )
+            });
+            let (aux_code, aux_name, is_unmatched) = match matched {
                 Some((code, name)) => (code, name, false),
                 None => {
                     unmatched_drugs.push(ExternalUnmatchedDrug {
+                        id: item.row_no,
                         row_index: item.row_no,
                         name: item.name.clone(),
                         factory: item.factory.clone(),
@@ -791,6 +960,12 @@ pub fn generate_external_inbound_voucher(
                         qty: item.qty,
                         amount: item.amount,
                         supplier: Some(s_name.clone()),
+                        candidates: build_external_inventory_candidates(
+                            &item.name,
+                            &item.spec,
+                            &item.factory,
+                            &template_data,
+                        ),
                     });
                     (String::new(), item.name.clone(), true)
                 }
@@ -927,6 +1102,7 @@ pub fn generate_external_outbound_voucher(
     custom_date: Option<&str>,
     voucher_no: Option<&str>,
     _config: Option<&ConfigData>,
+    confirmed_mappings: Option<&[ConfirmedExternalInventoryMapping]>,
 ) -> Result<ExternalOutboundResult, String> {
     let template_data = load_external_template(template_path)?;
     let factory_abbr = get_merged_factory_abbr_map(_config);
@@ -1076,16 +1252,25 @@ pub fn generate_external_outbound_voucher(
 
     let mut credit_rows = Vec::new();
     for item in &raw_items {
-        let (aux_code, aux_name, is_unmatched) = match match_external_inventory_code(
-            &item.name,
-            &item.spec,
-            &item.factory,
-            &template_data.inventory_items,
-            &factory_abbr,
-        ) {
+        let matched = find_confirmed_external_inventory_match(
+            item.row_no,
+            confirmed_mappings,
+            &template_data,
+        )
+        .or_else(|| {
+            match_external_inventory_code(
+                &item.name,
+                &item.spec,
+                &item.factory,
+                &template_data.inventory_items,
+                &factory_abbr,
+            )
+        });
+        let (aux_code, aux_name, is_unmatched) = match matched {
             Some((code, name)) => (code, name, false),
             None => {
                 unmatched_drugs.push(ExternalUnmatchedDrug {
+                    id: item.row_no,
                     row_index: item.row_no,
                     name: item.name.clone(),
                     factory: item.factory.clone(),
@@ -1093,6 +1278,12 @@ pub fn generate_external_outbound_voucher(
                     qty: item.qty,
                     amount: item.amount,
                     supplier: None,
+                    candidates: build_external_inventory_candidates(
+                        &item.name,
+                        &item.spec,
+                        &item.factory,
+                        &template_data,
+                    ),
                 });
                 (String::new(), item.name.clone(), true)
             }
@@ -1991,4 +2182,56 @@ fn export_external_audit_excel(
         .save(output_path)
         .map_err(|e| format!("保存核对报告失败: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_inventory_item() -> ExternalInventoryItem {
+        ExternalInventoryItem {
+            code: "00042".to_string(),
+            name: "测试药片".to_string(),
+            spec: "10mg*10片".to_string(),
+            norm_spec: "10mg*10片".to_string(),
+            norm_name: "测试药片".to_string(),
+            clean_name: "测试药片".to_string(),
+        }
+    }
+
+    #[test]
+    fn confirmed_external_mapping_accepts_only_template_inventory_codes() {
+        let item = sample_inventory_item();
+        let mut template_data = ExternalTemplateData::default();
+        template_data
+            .inventory_by_code
+            .insert(item.code.clone(), item);
+
+        let valid = [ConfirmedExternalInventoryMapping {
+            row_index: 12,
+            aux_code: "00042".to_string(),
+        }];
+        assert_eq!(
+            find_confirmed_external_inventory_match(12, Some(&valid), &template_data)
+                .map(|(code, _)| code),
+            Some("00042".to_string())
+        );
+
+        let invalid = [ConfirmedExternalInventoryMapping {
+            row_index: 12,
+            aux_code: "99999".to_string(),
+        }];
+        assert!(
+            find_confirmed_external_inventory_match(12, Some(&invalid), &template_data).is_none()
+        );
+    }
+
+    #[test]
+    fn external_candidate_search_scores_code_name_and_spec() {
+        let item = sample_inventory_item();
+        assert!(external_candidate_score("00042", &item) > 0);
+        assert!(external_candidate_score("测试药", &item) > 0);
+        assert!(external_candidate_score("10mg", &item) > 0);
+        assert_eq!(external_candidate_score("", &item), 0);
+    }
 }

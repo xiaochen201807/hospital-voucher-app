@@ -1097,11 +1097,31 @@
               </div>
 
               <!-- 未匹配新药告警 -->
-              <div id="ext-unmatched-box" class="unmatched-box hidden">
+              <div id="ext-unmatched-box" class="unmatched-box hidden" data-manual-workspace="extInbound">
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">提示</span>
-                    <span>以下药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）：</span>
+                    <span>以下药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）；可在下方搜索并选择编码后重新生成：</span>
+                  </div>
+                  <div class="unmatched-actions">
+                    <button class="btn btn-outline btn-xs manual-workspace-control" data-manual-workspace-action="expand" title="展开为独立操作区，便于批量补全外账存货编码">
+                      ↗ 独立操作区
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="fullscreen" title="让独立操作区占满应用窗口">
+                      ⤢ 全屏
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="restore" title="还原为当前页面中的嵌入布局">
+                      ↙ 还原嵌入
+                    </button>
+                    <button id="btn-rerun-ext-inbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方手工选择的外账存货编码重新生成凭证">
+                      ✓ 按手工匹配重新生成
+                    </button>
+                    <button id="btn-copy-ext-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
+                      📋 复制清单
+                    </button>
+                    <button id="btn-export-ext-unmatched" class="btn btn-secondary btn-xs" title="导出未匹配药品清单为 CSV 表格">
+                      📥 导出未匹配清单
+                    </button>
                   </div>
                 </div>
                 <div class="table-container">
@@ -1115,6 +1135,7 @@
                         <th>数量</th>
                         <th>进价金额</th>
                         <th>供货商</th>
+                        <th style="text-align: center;">手工指定存货编码</th>
                       </tr>
                     </thead>
                     <tbody></tbody>
@@ -1296,11 +1317,31 @@
               </div>
 
               <!-- 未匹配新药告警 -->
-              <div id="ext-outbound-unmatched-box" class="unmatched-box hidden">
+              <div id="ext-outbound-unmatched-box" class="unmatched-box hidden" data-manual-workspace="extOutbound">
                 <div class="unmatched-header">
                   <div class="unmatched-title">
                     <span class="badge badge-warning">提示</span>
-                    <span>以下销售药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）：</span>
+                    <span>以下销售药品在外账模板【辅助信息】中未找到 5 位辅助编码（已在导出的 Excel 凭证表中高亮标黄）；可在下方搜索并选择编码后重新生成：</span>
+                  </div>
+                  <div class="unmatched-actions">
+                    <button class="btn btn-outline btn-xs manual-workspace-control" data-manual-workspace-action="expand" title="展开为独立操作区，便于批量补全外账存货编码">
+                      ↗ 独立操作区
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="fullscreen" title="让独立操作区占满应用窗口">
+                      ⤢ 全屏
+                    </button>
+                    <button class="btn btn-outline btn-xs manual-workspace-control hidden" data-manual-workspace-action="restore" title="还原为当前页面中的嵌入布局">
+                      ↙ 还原嵌入
+                    </button>
+                    <button id="btn-rerun-ext-outbound-manual" class="btn btn-primary btn-xs hidden" title="使用下方手工选择的外账存货编码重新生成凭证">
+                      ✓ 按手工匹配重新生成
+                    </button>
+                    <button id="btn-copy-ext-outbound-unmatched" class="btn btn-outline btn-xs" title="复制未匹配药品清单到剪贴板">
+                      📋 复制清单
+                    </button>
+                    <button id="btn-export-ext-outbound-unmatched" class="btn btn-secondary btn-xs" title="导出未匹配药品清单为 CSV 表格">
+                      📥 导出未匹配清单
+                    </button>
                   </div>
                 </div>
                 <div class="table-container">
@@ -1313,6 +1354,7 @@
                         <th>生产厂家</th>
                         <th>销售数量</th>
                         <th>进价金额</th>
+                        <th style="text-align: center;">手工指定存货编码</th>
                       </tr>
                     </thead>
                     <tbody></tbody>

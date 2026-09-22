@@ -243,6 +243,23 @@ fn search_ledger_candidates(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn search_external_inventory_candidates(
+    template: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let candidates = core::external::search_external_inventory_candidates(
+        Path::new(&template),
+        &query,
+        limit.unwrap_or(50),
+    )?;
+    Ok(json!({
+        "success": true,
+        "candidates": candidates
+    }))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 fn execute_outbound_voucher(
     app: tauri::AppHandle,
@@ -304,6 +321,7 @@ fn execute_external_inbound_voucher(
     output: Option<String>,
     date: Option<String>,
     voucher_no: Option<String>,
+    confirmed_items: Option<Vec<core::external::ConfirmedExternalInventoryMapping>>,
     config: Option<String>,
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
@@ -314,6 +332,7 @@ fn execute_external_inbound_voucher(
             date.as_deref(),
             voucher_no.as_deref(),
             Some(cfg),
+            confirmed_items.as_deref(),
         )
     })
 }
@@ -326,6 +345,7 @@ fn execute_external_outbound_voucher(
     output: Option<String>,
     date: Option<String>,
     voucher_no: Option<String>,
+    confirmed_items: Option<Vec<core::external::ConfirmedExternalInventoryMapping>>,
     config: Option<String>,
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
@@ -336,6 +356,7 @@ fn execute_external_outbound_voucher(
             date.as_deref(),
             voucher_no.as_deref(),
             Some(cfg),
+            confirmed_items.as_deref(),
         )
     })
 }
@@ -529,6 +550,7 @@ pub fn run() {
             scan_files,
             execute_sales_process,
             search_ledger_candidates,
+            search_external_inventory_candidates,
             execute_outbound_voucher,
             execute_inbound_voucher,
             execute_external_inbound_voucher,
@@ -662,6 +684,7 @@ mod tests {
             Some("2026-08-31"),
             Some("1"),
             Some(&cfg),
+            None,
         )
         .expect("纯 Rust 外账入库调用必须成功");
         assert!(in_res.is_balanced);
@@ -711,6 +734,7 @@ mod tests {
             Some("2026-08-31"),
             Some("2"),
             Some(&cfg),
+            None,
         )
         .expect("纯 Rust 外账出库调用必须成功");
         assert!(out_res.is_balanced);
@@ -971,6 +995,7 @@ mod tests {
             Some("2026-08-31"),
             Some("1"),
             Some(&cfg),
+            None,
         )
         .expect("外账入库凭证生成必须成功");
         assert!(ext_inbound_res.is_balanced, "外账入库借贷必须平衡");
@@ -1021,6 +1046,7 @@ mod tests {
             Some("2026-08-31"),
             Some("2"),
             Some(&cfg),
+            None,
         )
         .expect("外账销售出库结转凭证生成必须成功");
         assert!(ext_outbound_res.is_balanced, "外账出库借贷必须平衡");
