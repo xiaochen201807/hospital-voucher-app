@@ -351,11 +351,40 @@ function renderCandidateOptions(picker, candidates, selectedCode = '', options =
   picker.dataset.selectedCode = selected === '__NONE__' ? '' : selected;
 }
 
+function positionCandidateOptions(picker) {
+  const list = picker?.querySelector('.candidate-options');
+  const input = picker?.querySelector('.candidate-search-input');
+  if (!list || !input) return;
+
+  // 候选框位于表格滚动容器内，必须以这个容器的可视区域计算上下空间，
+  // 不能只参考浏览器窗口，否则清册底部的下拉框会被 table-container 裁掉。
+  const scrollContainer = picker.closest('.table-container');
+  const containerRect = scrollContainer?.getBoundingClientRect();
+  const inputRect = input.getBoundingClientRect();
+  const viewportBottom = Math.min(
+    containerRect?.bottom ?? window.innerHeight,
+    window.innerHeight
+  );
+  const viewportTop = Math.max(containerRect?.top ?? 0, 0);
+  const gap = 8;
+  const availableBelow = Math.max(0, Math.floor(viewportBottom - inputRect.bottom - gap));
+  const availableAbove = Math.max(0, Math.floor(inputRect.top - viewportTop - gap));
+  const preferredHeight = Math.min(250, Math.max(list.scrollHeight, 0));
+  const shouldOpenUp = availableBelow < preferredHeight && availableAbove > availableBelow;
+  const availableHeight = shouldOpenUp ? availableAbove : availableBelow;
+
+  list.classList.toggle('opens-up', shouldOpenUp);
+  // 至少保留一个可操作的滚动区域；正常情况下使用清册剩余空间，
+  // 候选很多时继续由候选框自身滚动，不会撑破外层清册。
+  list.style.maxHeight = `${Math.max(48, Math.min(250, availableHeight || 48))}px`;
+}
+
 function openCandidateOptions(picker) {
   const list = picker?.querySelector('.candidate-options');
   const input = picker?.querySelector('.candidate-search-input');
   if (!list) return;
   list.classList.remove('hidden');
+  positionCandidateOptions(picker);
   input?.setAttribute('aria-expanded', 'true');
 }
 

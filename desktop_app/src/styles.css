@@ -1522,6 +1522,12 @@ body.manual-workspace-open::after {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
 }
 
+/* 清册底部的输入框空间不足时，由脚本切换为向上展开，避免被外层滚动容器裁掉。 */
+.candidate-options.opens-up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
 .candidate-options::-webkit-scrollbar {
   width: 9px;
 }
@@ -1710,4 +1716,3 @@ body.manual-workspace-open::after {
   font-weight: 600;
   box-shadow: 0 0 8px rgba(20, 184, 166, 0.2);
 }
-
