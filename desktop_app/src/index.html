@@ -1427,19 +1427,43 @@
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>2. 药库在库实盘汇总报表 (Excel，西药/中药/耗材)</span>
-                    <span class="label-tip">读取药房库管系统导出的现存量汇总报表</span>
+                    <span>2. 西药房在库实盘汇总报表</span>
+                    <span class="label-tip">读取药房库管系统导出的西药现存量汇总报表</span>
                     <span class="badge">必需</span>
                   </label>
                   <div class="file-input-wrapper">
-                    <input type="text" id="ext-compare-wh-file" class="form-input" placeholder="请选择西药房或中药房库存汇总报表..." readonly />
-                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-wh">选择文件</button>
+                    <input type="text" id="ext-compare-west-file" class="form-input" placeholder="请选择西药房库存汇总报表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-west">选择文件</button>
                   </div>
                 </div>
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>3. 目标核对分析报告路径</span>
+                    <span>3. 中药房在库实盘汇总报表</span>
+                    <span class="label-tip">读取药房库管系统导出的中药现存量汇总报表</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-compare-tcm-file" class="form-input" placeholder="请选择中药房库存汇总报表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-tcm">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>4. 耗材库在库实盘汇总报表</span>
+                    <span class="label-tip">读取库管系统导出的耗材现存量汇总报表</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-compare-hc-file" class="form-input" placeholder="请选择耗材库库存汇总报表..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-hc">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>5. 目标核对分析报告路径</span>
                     <span class="label-tip">生成包含看板汇总与明细对账底稿的标准 Excel 报告</span>
                   </label>
                   <div class="file-input-wrapper">

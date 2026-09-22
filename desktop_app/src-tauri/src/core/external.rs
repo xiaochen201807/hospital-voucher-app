@@ -217,6 +217,14 @@ struct ExternalTemplateData {
     balance_by_code: HashMap<String, (f64, f64, f64)>,
 }
 
+#[derive(Debug, Clone)]
+struct ExternalWarehouseItem {
+    name: String,
+    spec: String,
+    factory: String,
+    qty: f64,
+}
+
 // ----------------------------------------------------
 // 2. 辅助字典与模板解析
 // ----------------------------------------------------
@@ -1413,29 +1421,25 @@ pub fn generate_external_outbound_voucher(
 // 5. 外账结存数智能比对 (纯 Rust 原生实现)
 // ----------------------------------------------------
 
-pub fn generate_external_inventory_audit(
-    template_path: &Path,
+fn load_external_warehouse_items(
     warehouse_path: &Path,
-    output_path: Option<&Path>,
-    _config: Option<&ConfigData>,
-) -> Result<ExternalAuditResult, String> {
-    let template_data = load_external_template(template_path)?;
-    let factory_abbr = get_merged_factory_abbr_map(_config);
-
-    let mut wh_excel = open_excel(warehouse_path)?;
+) -> Result<Vec<ExternalWarehouseItem>, String> {
+    let path_display = warehouse_path.display().to_string();
+    let mut wh_excel = open_excel(warehouse_path)
+        .map_err(|e| format!("读取库管报表 {} 失败: {}", path_display, e))?;
     let wh_sheet = wh_excel
         .sheet_names()
         .into_iter()
         .next()
-        .ok_or_else(|| "库管库存报表为空".to_string())?;
+        .ok_or_else(|| format!("库管报表 {} 为空", path_display))?;
 
     let wh_range = wh_excel
         .worksheet_range(&wh_sheet)
-        .map_err(|e| format!("读取库管报表失败: {}", e))?;
+        .map_err(|e| format!("读取库管报表 {} 失败: {}", path_display, e))?;
 
     let wh_rows: Vec<Vec<Data>> = wh_range.rows().map(|r| r.to_vec()).collect();
     if wh_rows.is_empty() {
-        return Err("库管报表无内容".to_string());
+        return Err(format!("库管报表 {} 无内容", path_display));
     }
 
     let mut header_idx = 0;
@@ -1467,17 +1471,12 @@ pub fn generate_external_inventory_audit(
         }
     }
 
-    let col_name = col_name.ok_or_else(|| "库管报表中未识别到【药品名称】列".to_string())?;
-    let col_qty = col_qty.ok_or_else(|| "库管报表中未识别到【数量】列".to_string())?;
+    let col_name =
+        col_name.ok_or_else(|| format!("库管报表 {} 中未识别到【药品名称】列", path_display))?;
+    let col_qty =
+        col_qty.ok_or_else(|| format!("库管报表 {} 中未识别到【数量】列", path_display))?;
 
-    struct WhItem {
-        name: String,
-        spec: String,
-        factory: String,
-        qty: f64,
-    }
-
-    let mut wh_items = Vec::new();
+    let mut items = Vec::new();
     for row in wh_rows.iter().skip(header_idx + 1) {
         let name = cell_as_string(row.get(col_name).unwrap_or(&Data::Empty))
             .trim()
@@ -1500,12 +1499,35 @@ pub fn generate_external_inventory_audit(
             .to_string();
         let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
 
-        wh_items.push(WhItem {
+        items.push(ExternalWarehouseItem {
             name,
             spec,
             factory,
             qty,
         });
+    }
+
+    Ok(items)
+}
+
+pub fn generate_external_inventory_audit(
+    template_path: &Path,
+    west_path: &Path,
+    tcm_path: &Path,
+    hc_path: &Path,
+    output_path: Option<&Path>,
+    _config: Option<&ConfigData>,
+) -> Result<ExternalAuditResult, String> {
+    let template_data = load_external_template(template_path)?;
+    let factory_abbr = get_merged_factory_abbr_map(_config);
+
+    let mut wh_items = Vec::new();
+    let mut seen_warehouse_paths = HashSet::new();
+    for warehouse_path in [west_path, tcm_path, hc_path] {
+        // 兼容测试或历史调用中重复传入同一张表，避免把同一库存重复计入。
+        if seen_warehouse_paths.insert(warehouse_path.to_path_buf()) {
+            wh_items.extend(load_external_warehouse_items(warehouse_path)?);
+        }
     }
 
     let mut records = Vec::new();

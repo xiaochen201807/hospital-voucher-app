@@ -365,14 +365,18 @@ fn execute_external_outbound_voucher(
 fn execute_external_inventory_audit(
     app: tauri::AppHandle,
     template: String,
-    warehouse: String,
+    west: String,
+    tcm: String,
+    hc: String,
     output: Option<String>,
     config: Option<String>,
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
         core::external::generate_external_inventory_audit(
             Path::new(&template),
-            Path::new(&warehouse),
+            Path::new(&west),
+            Path::new(&tcm),
+            Path::new(&hc),
             output.as_deref().map(Path::new),
             Some(cfg),
         )
@@ -780,6 +784,8 @@ mod tests {
         let cmp_res = core::external::generate_external_inventory_audit(
             Path::new(&tmpl_path),
             Path::new(&wh_path),
+            Path::new(&wh_path),
+            Path::new(&wh_path),
             Some(&audit_output),
             Some(&cfg),
         )
@@ -1090,6 +1096,8 @@ mod tests {
         // -------------------------------------------------------------------------
         let ext_audit_res = core::external::generate_external_inventory_audit(
             Path::new(&ext_tmpl_path),
+            Path::new(&west_path),
+            Path::new(&west_path),
             Path::new(&west_path),
             Some(&ext_audit_output),
             Some(&cfg),
