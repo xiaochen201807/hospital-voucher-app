@@ -778,6 +778,25 @@ fn find_confirmed_external_inventory_match(
         .map(|item| (item.code.clone(), item.name.clone()))
 }
 
+/// 外账输出路径与内账保持一致：未指定目录的文件名保存到对应输入文件同级目录；
+/// 用户填写绝对路径时保留用户指定位置。
+fn resolve_external_output_path(
+    source_path: &Path,
+    output_path: Option<&Path>,
+    default_name: &str,
+) -> PathBuf {
+    let parent = source_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    match output_path.filter(|path| !path.as_os_str().is_empty()) {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => parent.join(path),
+        None => parent.join(default_name),
+    }
+}
+
 // ----------------------------------------------------
 // 3. 外账入库凭证生成 (纯 Rust 原生实现)
 // ----------------------------------------------------
@@ -1054,9 +1073,11 @@ pub fn generate_external_inbound_voucher(
     let diff = ((total_debit_cents - total_credit_cents) as f64) / 100.0;
     let is_balanced = total_debit_cents == total_credit_cents;
 
-    let out_file_path = output_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("表格迁账参考模板_西药入库_已生成.xlsx"));
+    let out_file_path = resolve_external_output_path(
+        inbound_path,
+        output_path,
+        "表格迁账参考模板_西药入库_已生成.xlsx",
+    );
 
     write_external_voucher_workbook(template_path, &out_file_path, &voucher_rows)?;
 
@@ -1352,9 +1373,11 @@ pub fn generate_external_outbound_voucher(
         voucher_rows.push(cr);
     }
 
-    let out_file_path = output_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("表格迁账参考模板_西药出库_已生成.xlsx"));
+    let out_file_path = resolve_external_output_path(
+        sales_path,
+        output_path,
+        "表格迁账参考模板_西药出库_已生成.xlsx",
+    );
 
     write_external_voucher_workbook(template_path, &out_file_path, &voucher_rows)?;
 
@@ -1595,9 +1618,8 @@ pub fn generate_external_inventory_audit(
         0.0
     };
 
-    let out_file_path = output_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("外账账实库存核对分析报告.xlsx"));
+    let out_file_path =
+        resolve_external_output_path(template_path, output_path, "外账账实库存核对分析报告.xlsx");
 
     export_external_audit_excel(&out_file_path, &records)?;
 
@@ -2233,5 +2255,26 @@ mod tests {
         assert!(external_candidate_score("测试药", &item) > 0);
         assert!(external_candidate_score("10mg", &item) > 0);
         assert_eq!(external_candidate_score("", &item), 0);
+    }
+
+    #[test]
+    fn external_relative_output_stays_next_to_source_file() {
+        let relative = resolve_external_output_path(
+            Path::new("/var/data/入库单.xlsx"),
+            Some(Path::new("生成结果.xlsx")),
+            "默认结果.xlsx",
+        );
+        assert_eq!(relative, Path::new("/var/data/生成结果.xlsx"));
+
+        let default =
+            resolve_external_output_path(Path::new("/var/data/入库单.xlsx"), None, "默认结果.xlsx");
+        assert_eq!(default, Path::new("/var/data/默认结果.xlsx"));
+
+        let absolute = resolve_external_output_path(
+            Path::new("/var/data/入库单.xlsx"),
+            Some(Path::new("/tmp/用户指定结果.xlsx")),
+            "默认结果.xlsx",
+        );
+        assert_eq!(absolute, Path::new("/tmp/用户指定结果.xlsx"));
     }
 }

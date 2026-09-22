@@ -496,6 +496,23 @@ function bindManualCandidatePickers(table, kind, getSelectedCode, getCategory, o
     const context = state.manualSearch[kind];
     picker.dataset.selectedCode = getSelectedCode(itemId) || '';
 
+    // 候选列表有自己的滚动容器时，隔离滚轮事件，避免滚动事件继续冒泡到
+    // 外层未匹配清册；候选不足一屏时则保留外层清册的自然滚动行为。
+    list.onwheel = (event) => {
+      if (list.scrollHeight <= list.clientHeight + 1) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const delta = event.deltaMode === 1
+        ? event.deltaY * 16
+        : event.deltaMode === 2
+          ? event.deltaY * list.clientHeight
+          : event.deltaY;
+      const maxScrollTop = list.scrollHeight - list.clientHeight;
+      list.scrollTop = Math.max(0, Math.min(maxScrollTop, list.scrollTop + delta));
+    };
+
     input.onfocus = () => {
       input.select();
       const selected = getSelectedCode(itemId) || picker.dataset.selectedCode || '';

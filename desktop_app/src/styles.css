@@ -1510,12 +1510,35 @@ body.manual-workspace-open::after {
   left: 0;
   right: 0;
   max-height: 250px;
-  overflow-y: auto;
+  overflow-y: scroll;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(45, 212, 191, 0.72) rgba(15, 23, 42, 0.9);
   padding: 4px;
   background: #111b2f;
   border: 1px solid rgba(45, 212, 191, 0.55);
   border-radius: 7px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+}
+
+.candidate-options::-webkit-scrollbar {
+  width: 9px;
+}
+
+.candidate-options::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.9);
+  border-radius: 5px;
+}
+
+.candidate-options::-webkit-scrollbar-thumb {
+  background: rgba(45, 212, 191, 0.72);
+  border: 2px solid rgba(15, 23, 42, 0.9);
+  border-radius: 5px;
+}
+
+.candidate-options::-webkit-scrollbar-thumb:hover {
+  background: #5eead4;
 }
 
 .candidate-option {
@@ -1687,5 +1710,4 @@ body.manual-workspace-open::after {
   font-weight: 600;
   box-shadow: 0 0 8px rgba(20, 184, 166, 0.2);
 }
-
 
