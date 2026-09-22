@@ -169,7 +169,7 @@
               </div>
               <div class="nav-label">
                 <div class="nav-name">外账结存数比对</div>
-                <div class="nav-desc">辅助余额表 vs 库管实盘</div>
+                <div class="nav-desc">数量式明细账 vs 库管实盘</div>
               </div>
             </button>
           </div>
@@ -1402,12 +1402,12 @@
             </div>
           </section>
 
-          <!-- TAB: 外账结存数比对 (辅助余额表 vs 库管实盘) -->
+          <!-- TAB: 外账结存数比对 (数量式明细账 vs 库管实盘) -->
           <section id="tab-ext-compare" class="tab-panel">
             <div class="panel-header">
               <div class="panel-title-group">
                 <h2 class="panel-title">外账结存数与库管实物智能比对</h2>
-                <p class="panel-desc">读取《表格迁账参考模板.xlsx》【辅助余额表】1405 存货结存数据，与库管在库报表进行四维智能比对（完全吻合、数量差异、仅外账、仅库管）。</p>
+                <p class="panel-desc">读取外账《数量式明细账》【辅助项目】与【余额】中的 1405 存货结存数据，按“辅助项目 = 药品名称 + 规格 + 剂型 + 制药厂”唯一键，与西药、中药、耗材三类在库数据进行严格比对；规格或厂家无法唯一确认时不自动猜测。</p>
               </div>
             </div>
 
@@ -1415,13 +1415,13 @@
               <div class="form-card">
                 <div class="form-group">
                   <label class="form-label">
-                    <span>1. 外账参考模板 (表格迁账参考模板.xlsx)</span>
-                    <span class="label-tip">自动读取【辅助余额表】中 1405 科目的期初/结存数量与金额</span>
+                    <span>1. 外账结存数表格 (数量式明细账 .xls / .xlsx)</span>
+                    <span class="label-tip">读取【辅助项目】中的辅助编码、名称/规格，以及【余额】数量、单价和金额；不依赖辅助信息 Sheet</span>
                     <span class="badge">必需</span>
                   </label>
                   <div class="file-input-wrapper">
-                    <input type="text" id="ext-compare-template-file" class="form-input" placeholder="请选择外账表格迁账参考模板..." readonly />
-                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-template">选择文件</button>
+                    <input type="text" id="ext-compare-ledger-file" class="form-input" placeholder="请选择外账数量式明细账..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-compare-ledger">选择文件</button>
                   </div>
                 </div>
 

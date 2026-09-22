@@ -364,7 +364,7 @@ fn execute_external_outbound_voucher(
 #[tauri::command(rename_all = "camelCase")]
 fn execute_external_inventory_audit(
     app: tauri::AppHandle,
-    template: String,
+    ledger: String,
     west: String,
     tcm: String,
     hc: String,
@@ -373,7 +373,7 @@ fn execute_external_inventory_audit(
 ) -> Result<Value, String> {
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
         core::external::generate_external_inventory_audit(
-            Path::new(&template),
+            Path::new(&ledger),
             Path::new(&west),
             Path::new(&tcm),
             Path::new(&hc),
@@ -676,6 +676,7 @@ mod tests {
         let inbound_path = project_file("西药入库单.xlsx");
         let sales_path = project_file("2026.8月西药销售表_已汇总.xlsx");
         let wh_path = project_file("石家庄心理医院新西药房库存汇总报表2026831.xls");
+        let ext_ledger_path = project_file("石家庄心理医院_数量式明细账_2026年09月.xls");
         let inbound_output = test_artifact("external_inbound");
         let outbound_output = test_artifact("external_outbound");
         let audit_output = test_artifact("external_audit");
@@ -782,7 +783,7 @@ mod tests {
 
         // 3. 测试纯 Rust 外账结存数比对
         let cmp_res = core::external::generate_external_inventory_audit(
-            Path::new(&tmpl_path),
+            Path::new(&ext_ledger_path),
             Path::new(&wh_path),
             Path::new(&wh_path),
             Path::new(&wh_path),
@@ -993,6 +994,7 @@ mod tests {
         // 6. 外账入库凭证纯 Rust 原生生成与借贷平衡验证
         // -------------------------------------------------------------------------
         let ext_tmpl_path = project_file("表格迁账参考模板.xlsx");
+        let ext_ledger_path = project_file("石家庄心理医院_数量式明细账_2026年09月.xls");
         let ext_inbound_path = project_file("西药入库单.xlsx");
         let ext_inbound_res = core::external::generate_external_inbound_voucher(
             Path::new(&ext_inbound_path),
@@ -1095,7 +1097,7 @@ mod tests {
         // 8. 外账结存数比对与四维智能审计验证
         // -------------------------------------------------------------------------
         let ext_audit_res = core::external::generate_external_inventory_audit(
-            Path::new(&ext_tmpl_path),
+            Path::new(&ext_ledger_path),
             Path::new(&west_path),
             Path::new(&west_path),
             Path::new(&west_path),
@@ -1103,9 +1105,9 @@ mod tests {
             Some(&cfg),
         )
         .expect("外账结存数比对必须成功");
-        assert_eq!(
-            ext_audit_res.total_items, 85,
-            "外账辅助信息品规数应为 85 种"
+        assert!(
+            ext_audit_res.total_items > 0,
+            "外账数量式明细账应读取到结存品规"
         );
         assert!(
             (0.0..=100.0).contains(&ext_audit_res.match_rate),

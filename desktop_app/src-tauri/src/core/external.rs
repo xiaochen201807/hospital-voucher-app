@@ -1,5 +1,8 @@
+use crate::core::audit::{load_warehouse_items, WarehouseItem};
 use crate::core::config::ConfigData;
-use crate::core::excel_utils::{cell_as_f64, cell_as_string, open_excel};
+use crate::core::excel_utils::{
+    cell_as_f64, cell_as_string, find_col_idx, open_excel, read_sheet_rows,
+};
 use calamine::{Data, Reader};
 use chrono::{Datelike, Local, NaiveDate};
 use regex::Regex;
@@ -204,6 +207,7 @@ struct ExternalInventoryItem {
     code: String,
     name: String,
     spec: String,
+    spec_key: String,
     norm_spec: String,
     norm_name: String,
     clean_name: String,
@@ -215,14 +219,6 @@ struct ExternalTemplateData {
     inventory_items: Vec<ExternalInventoryItem>,
     inventory_by_code: HashMap<String, ExternalInventoryItem>,
     balance_by_code: HashMap<String, (f64, f64, f64)>,
-}
-
-#[derive(Debug, Clone)]
-struct ExternalWarehouseItem {
-    name: String,
-    spec: String,
-    factory: String,
-    qty: f64,
 }
 
 // ----------------------------------------------------
@@ -318,6 +314,7 @@ fn load_external_template(template_path: &Path) -> Result<ExternalTemplateData, 
                         code: formatted_code.clone(),
                         name: aux_name.clone(),
                         spec: aux_spec.clone(),
+                        spec_key: normalize_inventory_spec_key(&aux_spec),
                         norm_spec: normalize_text(&aux_spec),
                         norm_name,
                         clean_name: clean,
@@ -358,6 +355,307 @@ fn load_external_template(template_path: &Path) -> Result<ExternalTemplateData, 
                 }
             }
         }
+    }
+
+    Ok(data)
+}
+
+fn find_external_group_column(row: &[Data], keyword: &str) -> Option<usize> {
+    row.iter()
+        .enumerate()
+        .find_map(|(idx, cell)| cell_as_string(cell).contains(keyword).then_some(idx))
+}
+
+fn find_external_subheader_column(row: &[Data], start: usize, label: &str) -> Option<usize> {
+    row.iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(idx, cell)| (cell_as_string(cell).trim() == label).then_some(idx))
+}
+
+fn normalize_external_aux_code(raw_code: &str) -> String {
+    let code = raw_code.trim();
+    if let Ok(number) = code.parse::<i64>() {
+        format!("{:05}", number)
+    } else {
+        code.to_string()
+    }
+}
+
+/// 生成用于外账结存唯一键的规格值。
+///
+/// 这里仅消除导出格式差异，不做“包含即相等”的模糊比较：统一全半角
+/// 分隔符、中文计量单位、包装后缀，以及片/粒/支/t 等数量单位后再比较。
+/// 瓶、袋等容器仍然保留，避免把不同包装的同规格药品混为一项。
+fn normalize_inventory_spec_key(value: &str) -> String {
+    let mut spec = normalize_text(value)
+        .to_lowercase()
+        .replace('：', ":")
+        .replace('；', ":")
+        .replace('／', "/")
+        .replace('－', "-")
+        .replace("毫克", "mg")
+        .replace("毫升", "ml")
+        .replace("微克", "ug")
+        .replace("公斤", "kg")
+        .replace("克", "g");
+
+    for suffix in ["盒", "瓶", "袋", "箱", "包"] {
+        let suffix = format!("/{}", suffix);
+        if spec.ends_with(&suffix) {
+            spec.truncate(spec.len() - suffix.len());
+            break;
+        }
+    }
+
+    for unit in ["片", "粒", "支", "t"] {
+        spec = spec.replace(unit, "");
+    }
+
+    spec.trim_end_matches('/').to_string()
+}
+
+/// 将库管表和辅助项目中的剂型归并为可比较的剂型族。
+///
+/// 数量式明细账没有单独的“剂型”列，因此从辅助项目药名中提取常见剂型；
+/// 无法从药名推导时返回空串，避免人为猜一个剂型造成错误匹配。
+fn inventory_dosage_family(value: &str) -> String {
+    let normalized = normalize_text(value);
+    let candidates = [
+        ("胶囊", "胶囊"),
+        ("注射", "注射"),
+        ("口服液", "溶液"),
+        ("溶液", "溶液"),
+        ("开塞露", "溶液"),
+        ("糖浆", "糖浆"),
+        ("颗粒", "颗粒"),
+        ("滴眼", "滴眼"),
+        ("滴耳", "滴耳"),
+        ("软膏", "软膏"),
+        ("乳膏", "软膏"),
+        ("喷雾", "喷雾"),
+        ("凝胶", "凝胶"),
+        ("栓", "栓"),
+        ("丸", "丸"),
+        ("散", "散"),
+        ("贴", "贴"),
+        ("片", "片"),
+    ];
+
+    candidates
+        .iter()
+        .find_map(|(keyword, family)| {
+            normalized
+                .contains(keyword)
+                .then_some((*family).to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn external_inventory_tags(value: &str) -> Vec<String> {
+    let normalized = normalize_text(value);
+    let Ok(re) = Regex::new(r"\(([^()]*)\)|\[([^\[\]]*)\]") else {
+        return Vec::new();
+    };
+
+    re.captures_iter(&normalized)
+        .filter_map(|caps| caps.get(1).or_else(|| caps.get(2)))
+        .flat_map(|m| m.as_str().split(['/', '、', ',', '，']))
+        .map(normalize_text)
+        .filter(|tag| !tag.is_empty())
+        .collect()
+}
+
+fn external_inventory_tag_matches_warehouse(
+    item: &ExternalInventoryItem,
+    warehouse: &WarehouseItem,
+    factory_map: &HashMap<String, String>,
+) -> bool {
+    let tags = external_inventory_tags(&item.name);
+    if tags.is_empty() {
+        return true;
+    }
+
+    let warehouse_name = normalize_text(&warehouse.name);
+    let warehouse_factory = normalize_text(&warehouse.factory);
+    let factory_alias = find_factory_abbreviation(&warehouse_factory, factory_map);
+
+    tags.iter().any(|tag| {
+        warehouse_name.contains(tag)
+            || warehouse_factory.contains(tag)
+            || factory_alias
+                .as_ref()
+                .is_some_and(|alias| tag.contains(alias) || alias.contains(tag))
+    })
+}
+
+fn warehouse_inventory_key(warehouse: &WarehouseItem) -> (String, String, String) {
+    (
+        clean_drug_name(&warehouse.name),
+        normalize_inventory_spec_key(&warehouse.spec),
+        inventory_dosage_family(&warehouse.dosage_form),
+    )
+}
+
+/// 按“辅助项目 = 药品名称 + 规格 + 剂型 + 制药厂”匹配外账结存。
+///
+/// 数量式明细账的辅助项目没有独立的剂型、厂家列，所以剂型从辅助项目药名
+/// 推导，厂家用辅助项目括号标签与库管药名/厂家核验；辅助项目没有厂家标签
+/// 时，只有在所选三张库管表中该名称、规格、剂型只对应一个厂家才允许命中。
+/// 规格必须使用规范化后的完整值相等，禁止旧的 contains/同名兜底。
+fn match_external_inventory_key(
+    warehouse: &WarehouseItem,
+    items: &[ExternalInventoryItem],
+    factory_map: &HashMap<String, String>,
+    warehouse_factory_counts: &HashMap<(String, String, String), HashSet<String>>,
+) -> Option<(String, String)> {
+    let (warehouse_name, warehouse_spec, warehouse_dosage) = warehouse_inventory_key(warehouse);
+
+    let mut candidates: Vec<&ExternalInventoryItem> = items
+        .iter()
+        .filter(|item| item.clean_name == warehouse_name)
+        .filter(|item| item.spec_key == warehouse_spec)
+        .filter(|item| {
+            let item_dosage = inventory_dosage_family(&item.name);
+            warehouse_dosage.is_empty() || item_dosage.is_empty() || item_dosage == warehouse_dosage
+        })
+        .filter(|item| external_inventory_tag_matches_warehouse(item, warehouse, factory_map))
+        .collect();
+
+    candidates.sort_by(|a, b| a.code.cmp(&b.code));
+    candidates.dedup_by(|a, b| a.code == b.code);
+    if candidates.len() != 1 {
+        return None;
+    }
+
+    let item = candidates[0];
+    let item_has_factory_tag = !external_inventory_tags(&item.name).is_empty();
+    if !item_has_factory_tag
+        && warehouse_factory_counts
+            .get(&(warehouse_name, warehouse_spec, warehouse_dosage))
+            .is_some_and(|factories| factories.len() > 1)
+    {
+        return None;
+    }
+
+    Some((item.code.clone(), item.name.clone()))
+}
+
+fn split_external_auxiliary(value: &str) -> Option<(String, String, String)> {
+    let mut parts = value.trim().splitn(2, |c: char| c.is_whitespace());
+    let raw_code = parts.next()?.trim();
+    let description = parts.next()?.trim();
+    if raw_code.is_empty() || description.is_empty() {
+        return None;
+    }
+
+    let mut name_parts = description.splitn(2, |c: char| c.is_whitespace());
+    let name = name_parts.next()?.trim().to_string();
+    let spec = name_parts.next().unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((normalize_external_aux_code(raw_code), name, spec))
+}
+
+/// 读取外账数量式明细账中的 1405 结存数据。
+///
+/// 该账表不依赖迁账模板的【辅助信息】Sheet，直接使用“辅助项目”里的五位
+/// 辅助编码、名称/规格，以及“余额”分组下的数量、单价和金额。
+fn load_external_quantity_ledger(ledger_path: &Path) -> Result<ExternalTemplateData, String> {
+    let path_display = ledger_path.display().to_string();
+    let (_, rows) = read_sheet_rows(ledger_path, &[], "外账数量式明细账")
+        .map_err(|e| format!("读取外账数量式明细账 {} 失败: {}", path_display, e))?;
+
+    let header_idx = rows
+        .iter()
+        .take(12)
+        .position(|row| {
+            find_col_idx(row, &["科目"]).is_some()
+                && find_col_idx(row, &["辅助项目"]).is_some()
+                && find_col_idx(row, &["摘要"]).is_some()
+        })
+        .ok_or_else(|| format!("外账数量式明细账 {} 中未识别到表头", path_display))?;
+    let header = &rows[header_idx];
+    let subheader = rows
+        .get(header_idx + 1)
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少数量子表头", path_display))?;
+
+    let col_subject = find_col_idx(header, &["科目"])
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【科目】列", path_display))?;
+    let col_auxiliary = find_col_idx(header, &["辅助项目"])
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【辅助项目】列", path_display))?;
+    let col_summary = find_col_idx(header, &["摘要"])
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【摘要】列", path_display))?;
+    let balance_start = find_external_group_column(header, "余额")
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【余额】分组", path_display))?;
+    let col_qty = find_external_subheader_column(subheader, balance_start, "数量")
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【余额-数量】列", path_display))?;
+    let col_price = find_external_subheader_column(subheader, balance_start, "单价")
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【余额-单价】列", path_display))?;
+    let col_amount = find_external_subheader_column(subheader, balance_start, "金额")
+        .ok_or_else(|| format!("外账数量式明细账 {} 缺少【余额-金额】列", path_display))?;
+
+    let mut data = ExternalTemplateData::default();
+    let mut row_priority_by_code = HashMap::new();
+    for row in rows.iter().skip(header_idx + 2) {
+        let subject = row.get(col_subject).map(cell_as_string).unwrap_or_default();
+        if !subject.trim_start().starts_with("1405") {
+            continue;
+        }
+
+        let auxiliary = row
+            .get(col_auxiliary)
+            .map(cell_as_string)
+            .unwrap_or_default();
+        let Some((code, name, spec)) = split_external_auxiliary(&auxiliary) else {
+            continue;
+        };
+
+        let summary = row.get(col_summary).map(cell_as_string).unwrap_or_default();
+        let priority = if summary.contains("本年累计") {
+            3
+        } else if summary.contains("本月合计") {
+            2
+        } else if summary.contains("期初余额") {
+            1
+        } else {
+            0
+        };
+        if row_priority_by_code
+            .get(&code)
+            .is_some_and(|current| *current > priority)
+        {
+            continue;
+        }
+        row_priority_by_code.insert(code.clone(), priority);
+
+        if !data.inventory_by_code.contains_key(&code) {
+            let item = ExternalInventoryItem {
+                code: code.clone(),
+                name: name.clone(),
+                spec: spec.clone(),
+                spec_key: normalize_inventory_spec_key(&spec),
+                norm_spec: normalize_text(&spec),
+                norm_name: normalize_text(&name),
+                clean_name: clean_drug_name(&name),
+            };
+            data.inventory_items.push(item.clone());
+            data.inventory_by_code.insert(code.clone(), item);
+        }
+
+        let price = row.get(col_price).map(cell_as_f64).unwrap_or(0.0);
+        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
+        let amount = row.get(col_amount).map(cell_as_f64).unwrap_or(0.0);
+        data.balance_by_code.insert(code, (price, qty, amount));
+    }
+
+    if data.inventory_items.is_empty() {
+        return Err(format!(
+            "外账数量式明细账 {} 中未读取到 1405 存货结存数据",
+            path_display
+        ));
     }
 
     Ok(data)
@@ -1421,104 +1719,15 @@ pub fn generate_external_outbound_voucher(
 // 5. 外账结存数智能比对 (纯 Rust 原生实现)
 // ----------------------------------------------------
 
-fn load_external_warehouse_items(
-    warehouse_path: &Path,
-) -> Result<Vec<ExternalWarehouseItem>, String> {
-    let path_display = warehouse_path.display().to_string();
-    let mut wh_excel = open_excel(warehouse_path)
-        .map_err(|e| format!("读取库管报表 {} 失败: {}", path_display, e))?;
-    let wh_sheet = wh_excel
-        .sheet_names()
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("库管报表 {} 为空", path_display))?;
-
-    let wh_range = wh_excel
-        .worksheet_range(&wh_sheet)
-        .map_err(|e| format!("读取库管报表 {} 失败: {}", path_display, e))?;
-
-    let wh_rows: Vec<Vec<Data>> = wh_range.rows().map(|r| r.to_vec()).collect();
-    if wh_rows.is_empty() {
-        return Err(format!("库管报表 {} 无内容", path_display));
-    }
-
-    let mut header_idx = 0;
-    let mut col_name = None;
-    let mut col_spec = None;
-    let mut col_factory = None;
-    let mut col_qty = None;
-
-    for (r_idx, row) in wh_rows.iter().enumerate().take(10) {
-        for (c_idx, cell) in row.iter().enumerate() {
-            let s = cell_as_string(cell);
-            if s.contains("药品名称") || s.contains("通用名") || s.contains("品名") {
-                col_name = Some(c_idx);
-            } else if s.contains("规格") {
-                col_spec = Some(c_idx);
-            } else if s.contains("厂家") || s.contains("产地") {
-                col_factory = Some(c_idx);
-            } else if s.contains("在库数量")
-                || s.contains("结存数量")
-                || s.contains("现存量")
-                || s.contains("数量")
-            {
-                col_qty = Some(c_idx);
-            }
-        }
-        if col_name.is_some() && col_qty.is_some() {
-            header_idx = r_idx;
-            break;
-        }
-    }
-
-    let col_name =
-        col_name.ok_or_else(|| format!("库管报表 {} 中未识别到【药品名称】列", path_display))?;
-    let col_qty =
-        col_qty.ok_or_else(|| format!("库管报表 {} 中未识别到【数量】列", path_display))?;
-
-    let mut items = Vec::new();
-    for row in wh_rows.iter().skip(header_idx + 1) {
-        let name = cell_as_string(row.get(col_name).unwrap_or(&Data::Empty))
-            .trim()
-            .to_string();
-        if name.is_empty() || name.contains("合计") || name.contains("总计") {
-            continue;
-        }
-
-        let spec = col_spec
-            .and_then(|c| row.get(c))
-            .map(cell_as_string)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let factory = col_factory
-            .and_then(|c| row.get(c))
-            .map(cell_as_string)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
-
-        items.push(ExternalWarehouseItem {
-            name,
-            spec,
-            factory,
-            qty,
-        });
-    }
-
-    Ok(items)
-}
-
 pub fn generate_external_inventory_audit(
-    template_path: &Path,
+    ledger_path: &Path,
     west_path: &Path,
     tcm_path: &Path,
     hc_path: &Path,
     output_path: Option<&Path>,
     _config: Option<&ConfigData>,
 ) -> Result<ExternalAuditResult, String> {
-    let template_data = load_external_template(template_path)?;
+    let ledger_data = load_external_quantity_ledger(ledger_path)?;
     let factory_abbr = get_merged_factory_abbr_map(_config);
 
     let mut wh_items = Vec::new();
@@ -1526,8 +1735,20 @@ pub fn generate_external_inventory_audit(
     for warehouse_path in [west_path, tcm_path, hc_path] {
         // 兼容测试或历史调用中重复传入同一张表，避免把同一库存重复计入。
         if seen_warehouse_paths.insert(warehouse_path.to_path_buf()) {
-            wh_items.extend(load_external_warehouse_items(warehouse_path)?);
+            // 外账结存核对与内账使用同一套库管报表解析规则，兼容 .xls/.xlsx
+            // 以及药品、耗材等不同名称列。
+            wh_items.extend(load_warehouse_items(warehouse_path)?);
         }
+    }
+
+    let mut warehouse_factory_counts: HashMap<(String, String, String), HashSet<String>> =
+        HashMap::new();
+    for warehouse in &wh_items {
+        let key = warehouse_inventory_key(warehouse);
+        warehouse_factory_counts
+            .entry(key)
+            .or_default()
+            .insert(normalize_text(&warehouse.factory));
     }
 
     let mut records = Vec::new();
@@ -1535,17 +1756,16 @@ pub fn generate_external_inventory_audit(
     let mut matched_wh_indices = HashSet::new();
 
     for (wh_idx, wh_item) in wh_items.iter().enumerate() {
-        if let Some((code, _)) = match_external_inventory_code(
-            &wh_item.name,
-            &wh_item.spec,
-            &wh_item.factory,
-            &template_data.inventory_items,
+        if let Some((code, _)) = match_external_inventory_key(
+            wh_item,
+            &ledger_data.inventory_items,
             &factory_abbr,
+            &warehouse_factory_counts,
         ) {
             matched_wh_indices.insert(wh_idx);
             matched_ext_codes.insert(code.clone());
 
-            let (ext_price, ext_qty, ext_amt) = template_data
+            let (ext_price, ext_qty, ext_amt) = ledger_data
                 .balance_by_code
                 .get(&code)
                 .cloned()
@@ -1558,7 +1778,7 @@ pub fn generate_external_inventory_audit(
                 "数量差异".to_string()
             };
 
-            let std_item = template_data.inventory_by_code.get(&code);
+            let std_item = ledger_data.inventory_by_code.get(&code);
             let display_name = std_item
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| wh_item.name.clone());
@@ -1598,10 +1818,10 @@ pub fn generate_external_inventory_audit(
         }
     }
 
-    for (code, (ext_price, ext_qty, ext_amt)) in &template_data.balance_by_code {
+    for (code, (ext_price, ext_qty, ext_amt)) in &ledger_data.balance_by_code {
         // 数量为 0 但金额非 0 的期末余额可能是历史尾差，不能在对账结果中静默丢失。
         if (ext_qty.abs() > 0.0001 || ext_amt.abs() > 0.0001) && !matched_ext_codes.contains(code) {
-            let std_item = template_data.inventory_by_code.get(code);
+            let std_item = ledger_data.inventory_by_code.get(code);
             let display_name = std_item
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| format!("外账存货{}", code));
@@ -1641,7 +1861,7 @@ pub fn generate_external_inventory_audit(
     };
 
     let out_file_path =
-        resolve_external_output_path(template_path, output_path, "外账账实库存核对分析报告.xlsx");
+        resolve_external_output_path(ledger_path, output_path, "外账账实库存核对分析报告.xlsx");
 
     export_external_audit_excel(&out_file_path, &records)?;
 
@@ -2237,10 +2457,119 @@ mod tests {
             code: "00042".to_string(),
             name: "测试药片".to_string(),
             spec: "10mg*10片".to_string(),
+            spec_key: normalize_inventory_spec_key("10mg*10片"),
             norm_spec: "10mg*10片".to_string(),
             norm_name: "测试药片".to_string(),
             clean_name: "测试药片".to_string(),
         }
+    }
+
+    fn inventory_item(code: &str, name: &str, spec: &str) -> ExternalInventoryItem {
+        ExternalInventoryItem {
+            code: code.to_string(),
+            name: name.to_string(),
+            spec: spec.to_string(),
+            spec_key: normalize_inventory_spec_key(spec),
+            norm_spec: normalize_text(spec),
+            norm_name: normalize_text(name),
+            clean_name: clean_drug_name(name),
+        }
+    }
+
+    fn warehouse_item(name: &str, spec: &str, dosage_form: &str, factory: &str) -> WarehouseItem {
+        WarehouseItem {
+            name: name.to_string(),
+            spec: spec.to_string(),
+            dosage_form: dosage_form.to_string(),
+            factory: factory.to_string(),
+            unit: "盒".to_string(),
+            qty: 1.0,
+            price: 1.0,
+            amount: 1.0,
+        }
+    }
+
+    fn warehouse_factory_counts(
+        warehouses: &[WarehouseItem],
+    ) -> HashMap<(String, String, String), HashSet<String>> {
+        let mut counts = HashMap::new();
+        for warehouse in warehouses {
+            counts
+                .entry(warehouse_inventory_key(warehouse))
+                .or_insert_with(HashSet::new)
+                .insert(normalize_text(&warehouse.factory));
+        }
+        counts
+    }
+
+    #[test]
+    fn external_inventory_key_prefers_exact_spec_and_factory_tag() {
+        let items = vec![
+            inventory_item("00004", "盐酸贝那普利片", "10mg"),
+            inventory_item("00965", "盐酸贝那普利片（湖南千金）", "10mg*28片/盒"),
+        ];
+        let warehouse =
+            warehouse_item("盐酸贝那普利片", "10mg*28片/盒", "片剂", "湖南千金湘江药业");
+        let warehouses = vec![warehouse.clone()];
+        let counts = warehouse_factory_counts(&warehouses);
+        let factory_map = get_merged_factory_abbr_map(None);
+
+        assert_eq!(
+            match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
+                .map(|(code, _)| code),
+            Some("00965".to_string())
+        );
+    }
+
+    #[test]
+    fn external_inventory_key_does_not_use_contains_or_wrong_dosage() {
+        let items = vec![inventory_item("00051", "地西泮注射液", "2ml：10mg")];
+        let warehouse = warehouse_item(
+            "地西泮注射液",
+            "10mg*10支/盒",
+            "注射剂",
+            "国药集团容生制药有限公司",
+        );
+        let counts = warehouse_factory_counts(std::slice::from_ref(&warehouse));
+        let factory_map = get_merged_factory_abbr_map(None);
+        assert!(match_external_inventory_key(&warehouse, &items, &factory_map, &counts).is_none());
+
+        let dosage_mismatch = warehouse_item(
+            "地西泮注射液",
+            "2ml：10mg",
+            "片剂",
+            "国药集团容生制药有限公司",
+        );
+        let mismatch_counts = warehouse_factory_counts(std::slice::from_ref(&dosage_mismatch));
+        assert!(match_external_inventory_key(
+            &dosage_mismatch,
+            &items,
+            &factory_map,
+            &mismatch_counts,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn external_inventory_key_rejects_untagged_factory_ambiguity() {
+        let items = vec![inventory_item("01037", "盐酸异丙嗪注射液", "50mg*10支/盒")];
+        let first = warehouse_item(
+            "盐酸异丙嗪注射液",
+            "50mg*10支/盒",
+            "注射剂",
+            "武汉福星生物药业有限公司",
+        );
+        let second = warehouse_item(
+            "盐酸异丙嗪注射液",
+            "50mg*10支/盒",
+            "注射剂",
+            "遂成药业股份有限公司",
+        );
+        let counts = warehouse_factory_counts(&[first.clone(), second.clone()]);
+        let factory_map = get_merged_factory_abbr_map(None);
+
+        assert!(match_external_inventory_key(&first, &items, &factory_map, &counts).is_none());
+        assert!(match_external_inventory_key(&second, &items, &factory_map, &counts).is_none());
     }
 
     #[test]

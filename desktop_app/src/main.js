@@ -771,12 +771,16 @@ function autoFillDetectedFiles(data) {
   }
 
   // 外账结存数比对输入框
-  const extCmpTmpl = document.getElementById('ext-compare-template-file');
+  const extCmpLedger = document.getElementById('ext-compare-ledger-file');
   const extCmpWest = document.getElementById('ext-compare-west-file');
   const extCmpTcm = document.getElementById('ext-compare-tcm-file');
   const extCmpHc = document.getElementById('ext-compare-hc-file');
-  if (extCmpTmpl && !extCmpTmpl.value && extTemplateCandidate) {
-    setAutoFilledFile(extCmpTmpl, extTemplateCandidate.path);
+  const extLedgerCandidate = findUniqueScannedFile(
+    data.all_excel || [],
+    file => file.name.includes('数量式明细账') || file.name.includes('数量金额明细账')
+  );
+  if (extCmpLedger && !extCmpLedger.value && extLedgerCandidate) {
+    setAutoFilledFile(extCmpLedger, extLedgerCandidate.path);
   }
   if (extCmpWest && !extCmpWest.value && westFile) {
     setAutoFilledFile(extCmpWest, westFile.path);
@@ -860,9 +864,9 @@ function applyScannedFileToActiveTab(item) {
       showToast(`已填入销售汇总表: ${name}`, 'info');
     }
   } else if (state.activeTab === 'tab-ext-compare') {
-    if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
-      setManuallySelectedFile(document.getElementById('ext-compare-template-file'), item.path);
-      showToast(`已填入外账参考模板: ${name}`, 'info');
+    if (name.includes('数量式明细账') || name.includes('数量金额明细账')) {
+      setManuallySelectedFile(document.getElementById('ext-compare-ledger-file'), item.path);
+      showToast(`已填入外账数量式明细账: ${name}`, 'info');
     } else if (name.includes('西药')) {
       setManuallySelectedFile(document.getElementById('ext-compare-west-file'), item.path);
       showToast(`已填入西药房库存表: ${name}`, 'info');
@@ -873,7 +877,7 @@ function applyScannedFileToActiveTab(item) {
       setManuallySelectedFile(document.getElementById('ext-compare-hc-file'), item.path);
       showToast(`已填入耗材库库存表: ${name}`, 'info');
     } else {
-      showToast(`无法根据文件名判断库存类别，请手动选择西药、中药或耗材报表: ${name}`, 'warning');
+      showToast(`无法根据文件名判断外账结存或库存类别，请手动选择对应报表: ${name}`, 'warning');
     }
   }
 }
@@ -1980,47 +1984,47 @@ function renderExtOutboundPreviewTable() {
 }
 
 // ----------------------------------------------------
-// 5.3 TAB: 外账结存数智能比对 (辅助余额表 vs 库管实盘)
+// 5.3 TAB: 外账结存数智能比对 (数量式明细账 vs 库管实盘)
 // ----------------------------------------------------
 function initTabExtCompare() {
-  const inTemplate = document.getElementById('ext-compare-template-file');
+  const inLedger = document.getElementById('ext-compare-ledger-file');
   const inWest = document.getElementById('ext-compare-west-file');
   const inTcm = document.getElementById('ext-compare-tcm-file');
   const inHc = document.getElementById('ext-compare-hc-file');
   const inOutput = document.getElementById('ext-compare-output-file');
   const btnRun = document.getElementById('btn-run-ext-compare');
 
-  bindFilePicker('btn-browse-ext-compare-template', inTemplate, '选择外账迁账参考模板');
+  bindFilePicker('btn-browse-ext-compare-ledger', inLedger, '选择外账数量式明细账');
   bindFilePicker('btn-browse-ext-compare-west', inWest, '选择西药房在库实盘报表');
   bindFilePicker('btn-browse-ext-compare-tcm', inTcm, '选择中药房在库实盘报表');
   bindFilePicker('btn-browse-ext-compare-hc', inHc, '选择耗材库在库实盘报表');
 
-  if (inTemplate) setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
+  if (inLedger) setupDropzone(inLedger, inLedger.closest('.file-input-wrapper'));
   if (inWest) setupDropzone(inWest, inWest.closest('.file-input-wrapper'));
   if (inTcm) setupDropzone(inTcm, inTcm.closest('.file-input-wrapper'));
   if (inHc) setupDropzone(inHc, inHc.closest('.file-input-wrapper'));
 
   btnRun.onclick = async () => {
-    const template = inTemplate.value.trim();
+    const ledger = inLedger.value.trim();
     const west = inWest.value.trim();
     const tcm = inTcm.value.trim();
     const hc = inHc.value.trim();
     const output = inOutput.value.trim() || '外账账实库存核对分析报告.xlsx';
 
-    if (!template) return showToast('请指定外账迁账参考模板', 'warning');
+    if (!ledger) return showToast('请指定外账数量式明细账', 'warning');
     if (!west) return showToast('请指定西药房在库实盘报表', 'warning');
     if (!tcm) return showToast('请指定中药房在库实盘报表', 'warning');
     if (!hc) return showToast('请指定耗材库在库实盘报表', 'warning');
 
     const res = await invokeWithLoading('execute_external_inventory_audit', {
-      template,
+      ledger,
       west,
       tcm,
       hc,
       output,
       config: null
     }, {
-      loadingMessage: '正在比对外账辅助余额表与库管在库数据并计算四维差异...',
+      loadingMessage: '正在读取数量式明细账辅助项目，按药品名称+规格+剂型+制药厂严格比对三类库管在库数量...',
       errorPrefix: '外账结存数比对失败',
       errorDuration: 6000
     });

@@ -1,7 +1,7 @@
 use crate::core::config::ConfigData;
 use crate::core::excel_utils::{
-    amount_or_product, cents_to_currency, currency_cents, find_header_row, is_summary_row,
-    optional_col, read_sheet_rows, required_col, row_as_f64, row_as_string,
+    amount_or_product, cents_to_currency, currency_cents, find_col_idx, find_header_row,
+    is_summary_row, optional_col, read_sheet_rows, required_col, row_as_f64, row_as_string,
 };
 pub use crate::core::ledger::load_categorized_ledger;
 use crate::core::matching::{build_ledger_candidates, match_drug_with_method};
@@ -64,6 +64,7 @@ pub struct OverallAuditResult {
 pub struct WarehouseItem {
     pub name: String,
     pub spec: String,
+    pub dosage_form: String,
     pub factory: String,
     pub unit: String,
     pub qty: f64,
@@ -126,7 +127,7 @@ pub struct ConfirmedAuditMappingItem {
 }
 
 /// 读取库管系统报表（西药、中药、耗材）
-fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
+pub(crate) fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
     let (_, rows) = read_sheet_rows(path, &[], "库管报表")?;
     if rows.len() < 2 {
         return Ok(Vec::new());
@@ -145,10 +146,11 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
         "药品/材料名称",
     )?;
     let col_spec = optional_col(header, &["规格"], col_name + 1);
+    let col_dosage_form = find_col_idx(header, &["剂型", "剂型名称", "剂型类别"]);
     let col_factory = optional_col(
         header,
         &["制药厂", "生产厂家", "厂家", "生产商"],
-        col_spec + 1,
+        col_dosage_form.unwrap_or(col_spec) + 1,
     );
     let col_unit = optional_col(header, &["单位"], col_factory + 1);
     let col_qty = optional_col(
@@ -170,6 +172,9 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
         }
 
         let spec = row_as_string(row, col_spec);
+        let dosage_form = col_dosage_form
+            .map(|col| row_as_string(row, col))
+            .unwrap_or_default();
         let factory = row_as_string(row, col_factory);
         let unit = row_as_string(row, col_unit);
         let qty = row_as_f64(row, col_qty);
@@ -183,6 +188,7 @@ fn load_warehouse_items(path: &Path) -> Result<Vec<WarehouseItem>, String> {
         items.push(WarehouseItem {
             name,
             spec,
+            dosage_form,
             factory,
             unit,
             qty,
