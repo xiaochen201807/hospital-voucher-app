@@ -466,14 +466,19 @@ fn external_inventory_tags(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn external_inventory_tag_matches_warehouse(
+/// 判断带厂家标签的外账辅助项目是否对应库管厂家。
+///
+/// 外账辅助项目中的厂家通常写在药名括号里（如“桑寄生（蕴德）”，而库管
+/// 表把厂家放在独立列中）。这个判断单独抽出来，供匹配排序使用：当同名同
+/// 规格同时存在一个通用项目和一个带厂家项目时，应优先命中厂家项目。
+fn external_inventory_factory_matches_warehouse(
     item: &ExternalInventoryItem,
     warehouse: &WarehouseItem,
     factory_map: &HashMap<String, String>,
 ) -> bool {
     let tags = external_inventory_tags(&item.name);
     if tags.is_empty() {
-        return true;
+        return false;
     }
 
     let warehouse_name = normalize_text(&warehouse.name);
@@ -501,7 +506,8 @@ fn warehouse_inventory_key(warehouse: &WarehouseItem) -> (String, String, String
 ///
 /// 数量式明细账的辅助项目没有独立的剂型、厂家列，所以剂型从辅助项目药名
 /// 推导，厂家用辅助项目括号标签与库管药名/厂家核验；辅助项目没有厂家标签
-/// 时，只有在所选三张库管表中该名称、规格、剂型只对应一个厂家才允许命中。
+/// 时，只有在所选三张库管表中该名称、规格、剂型只对应一个厂家才允许命中；
+/// 同名同规格同时存在通用项目和厂家项目时，优先使用与库管厂家匹配的厂家项目。
 /// 规格必须使用规范化后的完整值相等，禁止旧的 contains/同名兜底。
 fn match_external_inventory_key(
     warehouse: &WarehouseItem,
@@ -511,7 +517,7 @@ fn match_external_inventory_key(
 ) -> Option<(String, String)> {
     let (warehouse_name, warehouse_spec, warehouse_dosage) = warehouse_inventory_key(warehouse);
 
-    let mut candidates: Vec<&ExternalInventoryItem> = items
+    let candidates: Vec<&ExternalInventoryItem> = items
         .iter()
         .filter(|item| item.clean_name == warehouse_name)
         .filter(|item| item.spec_key == warehouse_spec)
@@ -519,21 +525,33 @@ fn match_external_inventory_key(
             let item_dosage = inventory_dosage_family(&item.name);
             warehouse_dosage.is_empty() || item_dosage.is_empty() || item_dosage == warehouse_dosage
         })
-        .filter(|item| external_inventory_tag_matches_warehouse(item, warehouse, factory_map))
         .collect();
 
-    candidates.sort_by(|a, b| a.code.cmp(&b.code));
-    candidates.dedup_by(|a, b| a.code == b.code);
-    if candidates.len() != 1 {
+    // 与内账比对的厂家匹配规则保持一致：先用库管厂家锁定带厂家后缀的
+    // 外账项目。不能直接把“无厂家通用项目”和“厂家项目”一起视为歧义，
+    // 否则“桑寄生”会遮蔽“桑寄生（蕴德）”。
+    if let Some(item) = unique_inventory_match(candidates.iter().copied().filter(|item| {
+        !external_inventory_tags(&item.name).is_empty()
+            && external_inventory_factory_matches_warehouse(item, warehouse, factory_map)
+    })) {
+        return Some((item.code.clone(), item.name.clone()));
+    }
+
+    // 如果存在厂家专属项目但没有一个能和库管厂家对应，不能回退到通用项目，
+    // 避免把其他厂家的结存错挂到当前厂家。
+    if candidates
+        .iter()
+        .any(|item| !external_inventory_tags(&item.name).is_empty())
+    {
         return None;
     }
 
-    let item = candidates[0];
-    let item_has_factory_tag = !external_inventory_tags(&item.name).is_empty();
-    if !item_has_factory_tag
-        && warehouse_factory_counts
-            .get(&(warehouse_name, warehouse_spec, warehouse_dosage))
-            .is_some_and(|factories| factories.len() > 1)
+    // 没有厂家标签时才允许按唯一同名同规格项目匹配；多个厂家共用一个
+    // 通用外账项目时仍交给人工核对。
+    let item = unique_inventory_match(candidates.iter().copied())?;
+    if warehouse_factory_counts
+        .get(&(warehouse_name, warehouse_spec, warehouse_dosage))
+        .is_some_and(|factories| factories.len() > 1)
     {
         return None;
     }
@@ -2518,6 +2536,31 @@ mod tests {
             match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
                 .map(|(code, _)| code),
             Some("00965".to_string())
+        );
+    }
+
+    #[test]
+    fn external_inventory_key_prefers_factory_item_over_generic_item() {
+        let items = vec![
+            inventory_item("00999", "桑寄生", "1克*1000克/袋"),
+            inventory_item("01110", "桑寄生（蕴德）", "1克*1000克/袋"),
+        ];
+        let warehouse = warehouse_item("桑寄生", "1克*1000克/袋", "饮片", "河北蕴德药业有限公司");
+        let counts = warehouse_factory_counts(std::slice::from_ref(&warehouse));
+        let factory_map = get_merged_factory_abbr_map(None);
+
+        assert_eq!(
+            match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
+                .map(|(code, _)| code),
+            Some("01110".to_string())
+        );
+
+        let wrong_factory =
+            warehouse_item("桑寄生", "1克*1000克/袋", "饮片", "河北国瑞堂药业有限公司");
+        let wrong_counts = warehouse_factory_counts(std::slice::from_ref(&wrong_factory));
+        assert!(
+            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts,)
+                .is_none()
         );
     }
 
