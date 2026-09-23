@@ -466,32 +466,84 @@ fn external_inventory_tags(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn external_inventory_tag_is_dosage(tag: &str) -> bool {
+    !inventory_dosage_family(tag).is_empty()
+}
+
+/// 判断外账辅助项目名称是否与库管药名相同，或只是附带了厂家后缀。
+///
+/// 例如外账可能写成“ 五味子（颗粒）以岭 ”，库管则拆成药名“ 五味子（颗粒） ”
+/// 和厂家“ 石家庄以岭药业股份有限公司 ”两列。清洗括号内容后两者不再相等，
+/// 因此还要允许外账标准名称以库管药名开头。
+fn external_inventory_name_matches_warehouse(
+    item: &ExternalInventoryItem,
+    warehouse: &WarehouseItem,
+) -> bool {
+    let warehouse_name = clean_drug_name(&warehouse.name);
+    item.clean_name == warehouse_name
+        || item.norm_name.starts_with(&normalize_text(&warehouse.name))
+}
+
 /// 判断带厂家标签的外账辅助项目是否对应库管厂家。
 ///
 /// 外账辅助项目中的厂家通常写在药名括号里（如“桑寄生（蕴德）”，而库管
-/// 表把厂家放在独立列中）。这个判断单独抽出来，供匹配排序使用：当同名同
-/// 规格同时存在一个通用项目和一个带厂家项目时，应优先命中厂家项目。
+/// 表把厂家放在独立列中）；也可能写成“ 五味子（颗粒）以岭 ”这种剂型括号后
+/// 追加厂家简称。这个判断单独抽出来，供匹配排序使用：当同名同规格同时存在
+/// 一个通用项目和一个带厂家项目时，应优先命中厂家项目。
 fn external_inventory_factory_matches_warehouse(
     item: &ExternalInventoryItem,
     warehouse: &WarehouseItem,
     factory_map: &HashMap<String, String>,
 ) -> bool {
     let tags = external_inventory_tags(&item.name);
-    if tags.is_empty() {
-        return false;
-    }
-
-    let warehouse_name = normalize_text(&warehouse.name);
     let warehouse_factory = normalize_text(&warehouse.factory);
     let factory_alias = find_factory_abbreviation(&warehouse_factory, factory_map);
 
-    tags.iter().any(|tag| {
-        warehouse_name.contains(tag)
-            || warehouse_factory.contains(tag)
+    if tags.iter().any(|tag| {
+        !external_inventory_tag_is_dosage(tag)
+            && (warehouse_factory.contains(tag)
+                || factory_alias
+                    .as_ref()
+                    .is_some_and(|alias| tag.contains(alias) || alias.contains(tag)))
+    }) {
+        return true;
+    }
+
+    // 厂家简称也可能位于剂型括号之后，例如“ 五味子（颗粒）以岭 ”。
+    // 去掉与库管药名相同的前缀和括号内容后，剩余部分就是厂家标识。
+    let warehouse_name = normalize_text(&warehouse.name);
+    let suffix = item
+        .norm_name
+        .strip_prefix(&warehouse_name)
+        .map(clean_drug_name)
+        .unwrap_or_default();
+    !suffix.is_empty()
+        && (warehouse_factory.contains(&suffix)
             || factory_alias
                 .as_ref()
-                .is_some_and(|alias| tag.contains(alias) || alias.contains(tag))
-    })
+                .is_some_and(|alias| suffix.contains(alias) || alias.contains(&suffix)))
+}
+
+/// 判断外账项目是否携带了厂家标识。
+///
+/// 单独的剂型括号（如“（颗粒）”）不是厂家标识，不能因此阻止唯一的通用
+/// 项目匹配；括号中的非剂型内容，或药名后追加的非括号内容，则视为厂家标识。
+fn external_inventory_has_factory_marker(
+    item: &ExternalInventoryItem,
+    warehouse: &WarehouseItem,
+) -> bool {
+    if external_inventory_tags(&item.name)
+        .iter()
+        .any(|tag| !external_inventory_tag_is_dosage(tag))
+    {
+        return true;
+    }
+
+    let warehouse_name = normalize_text(&warehouse.name);
+    item.norm_name
+        .strip_prefix(&warehouse_name)
+        .map(clean_drug_name)
+        .is_some_and(|suffix| !suffix.is_empty())
 }
 
 fn warehouse_inventory_key(warehouse: &WarehouseItem) -> (String, String, String) {
@@ -519,7 +571,7 @@ fn match_external_inventory_key(
 
     let candidates: Vec<&ExternalInventoryItem> = items
         .iter()
-        .filter(|item| item.clean_name == warehouse_name)
+        .filter(|item| external_inventory_name_matches_warehouse(item, warehouse))
         .filter(|item| item.spec_key == warehouse_spec)
         .filter(|item| {
             let item_dosage = inventory_dosage_family(&item.name);
@@ -531,7 +583,7 @@ fn match_external_inventory_key(
     // 外账项目。不能直接把“无厂家通用项目”和“厂家项目”一起视为歧义，
     // 否则“桑寄生”会遮蔽“桑寄生（蕴德）”。
     if let Some(item) = unique_inventory_match(candidates.iter().copied().filter(|item| {
-        !external_inventory_tags(&item.name).is_empty()
+        external_inventory_has_factory_marker(item, warehouse)
             && external_inventory_factory_matches_warehouse(item, warehouse, factory_map)
     })) {
         return Some((item.code.clone(), item.name.clone()));
@@ -541,7 +593,7 @@ fn match_external_inventory_key(
     // 避免把其他厂家的结存错挂到当前厂家。
     if candidates
         .iter()
-        .any(|item| !external_inventory_tags(&item.name).is_empty())
+        .any(|item| external_inventory_has_factory_marker(item, warehouse))
     {
         return None;
     }
@@ -2557,6 +2609,40 @@ mod tests {
 
         let wrong_factory =
             warehouse_item("桑寄生", "1克*1000克/袋", "饮片", "河北国瑞堂药业有限公司");
+        let wrong_counts = warehouse_factory_counts(std::slice::from_ref(&wrong_factory));
+        assert!(
+            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn external_inventory_key_matches_factory_suffix_after_dosage_parentheses() {
+        let items = vec![
+            inventory_item("00902", "五味子（颗粒）", "3g*50袋/包"),
+            inventory_item("00903", "五味子（颗粒）以岭", "3g*50袋/包"),
+        ];
+        let warehouse = warehouse_item(
+            "五味子（颗粒）",
+            "3g*50袋/包",
+            "颗粒剂",
+            "石家庄以岭药业股份有限公司",
+        );
+        let counts = warehouse_factory_counts(std::slice::from_ref(&warehouse));
+        let factory_map = get_merged_factory_abbr_map(None);
+
+        assert_eq!(
+            match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
+                .map(|(code, _)| code),
+            Some("00903".to_string())
+        );
+
+        let wrong_factory = warehouse_item(
+            "五味子（颗粒）",
+            "3g*50袋/包",
+            "颗粒剂",
+            "河北国瑞堂药业有限公司",
+        );
         let wrong_counts = warehouse_factory_counts(std::slice::from_ref(&wrong_factory));
         assert!(
             match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts,)
