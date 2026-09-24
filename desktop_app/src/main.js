@@ -2089,12 +2089,14 @@ function renderExtCompareResult(data) {
   const diffCount = records.filter(r => r.status === '数量差异').length;
   const extCount = records.filter(r => r.status === '仅外账有').length;
   const whCount = records.filter(r => r.status === '仅库管有').length;
+  const lowConfidenceCount = records.filter(r => r.match_confidence === '低').length;
 
   document.getElementById('cnt-ext-cmp-all').textContent = records.length;
   document.getElementById('cnt-ext-cmp-equal').textContent = equalCount;
   document.getElementById('cnt-ext-cmp-diff').textContent = diffCount;
   document.getElementById('cnt-ext-cmp-ext').textContent = extCount;
   document.getElementById('cnt-ext-cmp-wh').textContent = whCount;
+  document.getElementById('cnt-ext-cmp-low').textContent = lowConfidenceCount;
   document.getElementById('ext-compare-count-tip').textContent = `共 ${records.length} 条核对记录 (报告: ${escapeHtml(data.output_file)})`;
 
   renderExtCompareTable();
@@ -2111,6 +2113,7 @@ function renderExtCompareTable() {
     if (filter === 'DIFF') return r.status === '数量差异';
     if (filter === 'EXT_ONLY') return r.status === '仅外账有';
     if (filter === 'WH_ONLY') return r.status === '仅库管有';
+    if (filter === 'LOW_CONF') return r.match_confidence === '低';
     return true;
   });
 
@@ -2143,6 +2146,8 @@ function renderExtCompareTable() {
       <td style="text-align: right; font-family: monospace;">${r.wh_qty}</td>
       <td style="text-align: right; font-family: monospace; font-weight: 700; color: ${diffColor};">${diffDisplay}</td>
       <td style="text-align: center;">${badgeHtml}</td>
+      <td style="text-align: center;">${escapeHtml(r.match_confidence || '待核')}</td>
+      <td>${escapeHtml(r.match_basis || '-')}</td>
     `;
     tbody.appendChild(tr);
   });

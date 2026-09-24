@@ -792,6 +792,13 @@ mod tests {
         )
         .expect("纯 Rust 外账结存比对调用必须成功");
         assert!(cmp_res.total_items > 0);
+        let branded = cmp_res
+            .records
+            .iter()
+            .find(|record| record.aux_code == "00945")
+            .expect("外账 00945 应匹配库管同商品名药品");
+        assert_eq!(branded.status, "完全吻合");
+        assert_eq!(branded.match_confidence, "中");
 
         let _ = fs::remove_file(inbound_output);
         let _ = fs::remove_file(outbound_output);

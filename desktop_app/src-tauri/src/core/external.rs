@@ -187,6 +187,8 @@ pub struct ExternalAuditRecord {
     pub wh_qty: f64,
     pub diff_qty: f64,
     pub status: String,
+    pub match_confidence: String,
+    pub match_basis: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -211,6 +213,25 @@ struct ExternalInventoryItem {
     norm_spec: String,
     norm_name: String,
     clean_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalInventoryMatch {
+    code: String,
+    confidence: &'static str,
+    basis: &'static str,
+}
+
+fn external_inventory_match(
+    item: &ExternalInventoryItem,
+    confidence: &'static str,
+    basis: &'static str,
+) -> ExternalInventoryMatch {
+    ExternalInventoryMatch {
+        code: item.code.clone(),
+        confidence,
+        basis,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -531,15 +552,21 @@ fn external_inventory_factory_matches_warehouse(
 fn external_inventory_has_factory_marker(
     item: &ExternalInventoryItem,
     warehouse: &WarehouseItem,
+    factory_map: &HashMap<String, String>,
 ) -> bool {
+    // 同时出现在库管药名中的括号内容通常是商品名（如“博思清”）。
+    // 若它也确实能对应库管厂家，仍按厂家标识处理。
+    if external_inventory_factory_matches_warehouse(item, warehouse, factory_map) {
+        return true;
+    }
+    let warehouse_name = normalize_text(&warehouse.name);
     if external_inventory_tags(&item.name)
         .iter()
-        .any(|tag| !external_inventory_tag_is_dosage(tag))
+        .any(|tag| !external_inventory_tag_is_dosage(tag) && !warehouse_name.contains(tag))
     {
         return true;
     }
 
-    let warehouse_name = normalize_text(&warehouse.name);
     item.norm_name
         .strip_prefix(&warehouse_name)
         .map(clean_drug_name)
@@ -554,61 +581,158 @@ fn warehouse_inventory_key(warehouse: &WarehouseItem) -> (String, String, String
     )
 }
 
-/// 按“辅助项目 = 药品名称 + 规格 + 剂型 + 制药厂”匹配外账结存。
+/// 多厂家同品规时，通用项目只能分给没有厂家专属项目的唯一厂家。
+fn generic_inventory_target_is_unique(
+    warehouse: &WarehouseItem,
+    candidates: &[&ExternalInventoryItem],
+    factory_map: &HashMap<String, String>,
+    warehouse_factory_counts: &HashMap<(String, String, String), HashSet<String>>,
+) -> bool {
+    let key = warehouse_inventory_key(warehouse);
+    let Some(factories) = warehouse_factory_counts.get(&key) else {
+        return true;
+    };
+    if factories.len() <= 1 {
+        return true;
+    }
+
+    let unresolved_factories: Vec<&String> = factories
+        .iter()
+        .filter(|factory| {
+            let mut same_item = warehouse.clone();
+            same_item.factory = (*factory).clone();
+            !candidates.iter().any(|item| {
+                external_inventory_has_factory_marker(item, &same_item, factory_map)
+                    && external_inventory_factory_matches_warehouse(item, &same_item, factory_map)
+            })
+        })
+        .collect();
+    unresolved_factories.len() == 1
+        && unresolved_factories[0] == &normalize_text(&warehouse.factory)
+}
+
+/// 按名称、规格、剂型、厂家证据依次匹配，并保留匹配可信度与依据。
 ///
 /// 数量式明细账的辅助项目没有独立的剂型、厂家列，所以剂型从辅助项目药名
-/// 推导，厂家用辅助项目括号标签与库管药名/厂家核验；辅助项目没有厂家标签
-/// 时，只有在所选三张库管表中该名称、规格、剂型只对应一个厂家才允许命中；
-/// 同名同规格同时存在通用项目和厂家项目时，优先使用与库管厂家匹配的厂家项目。
-/// 规格必须使用规范化后的完整值相等，禁止旧的 contains/同名兜底。
+/// 推导，厂家用辅助项目括号标签与库管药名/厂家核验。
+/// 厂家专属项目优先；通用项目只在库管同品规中有唯一可分配厂家时回退。
+/// 外账规格缺失只在双方均为唯一候选时低可信度匹配，不做规格包含匹配。
 fn match_external_inventory_key(
     warehouse: &WarehouseItem,
     items: &[ExternalInventoryItem],
     factory_map: &HashMap<String, String>,
     warehouse_factory_counts: &HashMap<(String, String, String), HashSet<String>>,
-) -> Option<(String, String)> {
+) -> Option<ExternalInventoryMatch> {
     let (warehouse_name, warehouse_spec, warehouse_dosage) = warehouse_inventory_key(warehouse);
 
-    let candidates: Vec<&ExternalInventoryItem> = items
+    let name_candidates: Vec<&ExternalInventoryItem> = items
         .iter()
         .filter(|item| external_inventory_name_matches_warehouse(item, warehouse))
-        .filter(|item| item.spec_key == warehouse_spec)
         .filter(|item| {
             let item_dosage = inventory_dosage_family(&item.name);
             warehouse_dosage.is_empty() || item_dosage.is_empty() || item_dosage == warehouse_dosage
         })
         .collect();
+    let candidates: Vec<&ExternalInventoryItem> = name_candidates
+        .iter()
+        .copied()
+        .filter(|item| item.spec_key == warehouse_spec)
+        .collect();
 
     // 与内账比对的厂家匹配规则保持一致：先用库管厂家锁定带厂家后缀的
     // 外账项目。不能直接把“无厂家通用项目”和“厂家项目”一起视为歧义，
     // 否则“桑寄生”会遮蔽“桑寄生（蕴德）”。
-    if let Some(item) = unique_inventory_match(candidates.iter().copied().filter(|item| {
-        external_inventory_has_factory_marker(item, warehouse)
-            && external_inventory_factory_matches_warehouse(item, warehouse, factory_map)
-    })) {
-        return Some((item.code.clone(), item.name.clone()));
-    }
-
-    // 如果存在厂家专属项目但没有一个能和库管厂家对应，不能回退到通用项目，
-    // 避免把其他厂家的结存错挂到当前厂家。
-    if candidates
+    let factory_candidates: Vec<&ExternalInventoryItem> = candidates
         .iter()
-        .any(|item| external_inventory_has_factory_marker(item, warehouse))
-    {
+        .copied()
+        .filter(|item| {
+            external_inventory_has_factory_marker(item, warehouse, factory_map)
+                && external_inventory_factory_matches_warehouse(item, warehouse, factory_map)
+        })
+        .collect();
+    if let Some(item) = unique_inventory_match(factory_candidates.iter().copied()) {
+        return Some(external_inventory_match(
+            item,
+            "高",
+            "名称、规格、厂家标识一致",
+        ));
+    }
+    if !factory_candidates.is_empty() {
         return None;
     }
 
-    // 没有厂家标签时才允许按唯一同名同规格项目匹配；多个厂家共用一个
-    // 通用外账项目时仍交给人工核对。
-    let item = unique_inventory_match(candidates.iter().copied())?;
-    if warehouse_factory_counts
-        .get(&(warehouse_name, warehouse_spec, warehouse_dosage))
-        .is_some_and(|factories| factories.len() > 1)
-    {
+    // 多厂家同品规时，先为各厂家保留专属项目，再确定通用项目唯一归属。
+    if !generic_inventory_target_is_unique(
+        warehouse,
+        &candidates,
+        factory_map,
+        warehouse_factory_counts,
+    ) {
         return None;
     }
 
-    Some((item.code.clone(), item.name.clone()))
+    let unmarked: Vec<&ExternalInventoryItem> = candidates
+        .iter()
+        .copied()
+        .filter(|item| !external_inventory_has_factory_marker(item, warehouse, factory_map))
+        .collect();
+    let exact_name = normalize_text(&warehouse.name);
+    if let Some(item) = unique_inventory_match(
+        unmarked
+            .iter()
+            .copied()
+            .filter(|item| item.norm_name == exact_name),
+    ) {
+        let has_other_factory = candidates
+            .iter()
+            .any(|item| external_inventory_has_factory_marker(item, warehouse, factory_map));
+        if has_other_factory {
+            return Some(external_inventory_match(
+                item,
+                "低",
+                "名称、规格一致；其他厂家专属项目并存",
+            ));
+        }
+        return Some(external_inventory_match(
+            item,
+            "中",
+            "名称、规格一致；厂家未独立核验",
+        ));
+    }
+    if let Some(item) = unique_inventory_match(unmarked) {
+        let has_other_factory = candidates
+            .iter()
+            .any(|item| external_inventory_has_factory_marker(item, warehouse, factory_map));
+        let basis = if has_other_factory {
+            "通用名、规格一致；其他厂家专属项目并存"
+        } else {
+            "通用名、规格一致；厂家未独立核验"
+        };
+        let confidence = if has_other_factory { "低" } else { "中" };
+        return Some(external_inventory_match(item, confidence, basis));
+    }
+
+    // 外账未记录规格时，仅在外账同名项目和库管同名品规均唯一时给出低可信度配对。
+    if candidates.is_empty() && !warehouse_spec.is_empty() {
+        let item = unique_inventory_match(name_candidates.iter().copied())?;
+        let warehouse_variant_count: usize = warehouse_factory_counts
+            .iter()
+            .filter(|((name, _, _), _)| name == &warehouse_name)
+            .map(|(_, factories)| factories.len())
+            .sum();
+        if item.spec_key.is_empty()
+            && !external_inventory_has_factory_marker(item, warehouse, factory_map)
+            && warehouse_variant_count == 1
+        {
+            return Some(external_inventory_match(
+                item,
+                "低",
+                "外账规格缺失；同名项目与库管品规均唯一",
+            ));
+        }
+    }
+
+    None
 }
 
 fn split_external_auxiliary(value: &str) -> Option<(String, String, String)> {
@@ -1826,18 +1950,18 @@ pub fn generate_external_inventory_audit(
     let mut matched_wh_indices = HashSet::new();
 
     for (wh_idx, wh_item) in wh_items.iter().enumerate() {
-        if let Some((code, _)) = match_external_inventory_key(
+        if let Some(matched) = match_external_inventory_key(
             wh_item,
             &ledger_data.inventory_items,
             &factory_abbr,
             &warehouse_factory_counts,
         ) {
             matched_wh_indices.insert(wh_idx);
-            matched_ext_codes.insert(code.clone());
+            matched_ext_codes.insert(matched.code.clone());
 
             let (ext_price, ext_qty, ext_amt) = ledger_data
                 .balance_by_code
-                .get(&code)
+                .get(&matched.code)
                 .cloned()
                 .unwrap_or((0.0, 0.0, 0.0));
 
@@ -1848,7 +1972,7 @@ pub fn generate_external_inventory_audit(
                 "数量差异".to_string()
             };
 
-            let std_item = ledger_data.inventory_by_code.get(&code);
+            let std_item = ledger_data.inventory_by_code.get(&matched.code);
             let display_name = std_item
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| wh_item.name.clone());
@@ -1857,7 +1981,7 @@ pub fn generate_external_inventory_audit(
                 .unwrap_or_else(|| wh_item.spec.clone());
 
             records.push(ExternalAuditRecord {
-                aux_code: code,
+                aux_code: matched.code,
                 name: display_name,
                 spec: display_spec,
                 factory: wh_item.factory.clone(),
@@ -1867,6 +1991,8 @@ pub fn generate_external_inventory_audit(
                 wh_qty: wh_item.qty,
                 diff_qty: (diff_qty * 100.0).round() / 100.0,
                 status,
+                match_confidence: matched.confidence.to_string(),
+                match_basis: matched.basis.to_string(),
             });
         }
     }
@@ -1884,6 +2010,8 @@ pub fn generate_external_inventory_audit(
                 wh_qty: wh_item.qty,
                 diff_qty: wh_item.qty,
                 status: "仅库管有".to_string(),
+                match_confidence: "待核".to_string(),
+                match_basis: "未找到唯一可靠的外账配对".to_string(),
             });
         }
     }
@@ -1908,6 +2036,8 @@ pub fn generate_external_inventory_audit(
                 wh_qty: 0.0,
                 diff_qty: -(*ext_qty),
                 status: "仅外账有".to_string(),
+                match_confidence: "待核".to_string(),
+                match_basis: "未找到唯一可靠的库管配对".to_string(),
             });
         }
     }
@@ -2431,6 +2561,8 @@ fn export_external_audit_excel(
         "库管在库数量",
         "数量差异 (库管-外账)",
         "核对状态",
+        "匹配可信度",
+        "匹配依据",
     ];
 
     for (c, h) in headers.iter().enumerate() {
@@ -2482,6 +2614,12 @@ fn export_external_audit_excel(
         worksheet
             .write_string_with_format(row_idx, 10, &r.status, &center_format)
             .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string_with_format(row_idx, 11, &r.match_confidence, &center_format)
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string_with_format(row_idx, 12, &r.match_basis, base_fmt)
+            .map_err(|e| e.to_string())?;
     }
 
     worksheet
@@ -2510,6 +2648,12 @@ fn export_external_audit_excel(
         .map_err(|e| e.to_string())?;
     worksheet
         .set_column_width(10, 12)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .set_column_width(11, 14)
+        .map_err(|e| e.to_string())?;
+    worksheet
+        .set_column_width(12, 38)
         .map_err(|e| e.to_string())?;
 
     workbook
@@ -2586,7 +2730,7 @@ mod tests {
 
         assert_eq!(
             match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
-                .map(|(code, _)| code),
+                .map(|matched| matched.code),
             Some("00965".to_string())
         );
     }
@@ -2603,17 +2747,18 @@ mod tests {
 
         assert_eq!(
             match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
-                .map(|(code, _)| code),
+                .map(|matched| matched.code),
             Some("01110".to_string())
         );
 
         let wrong_factory =
             warehouse_item("桑寄生", "1克*1000克/袋", "饮片", "河北国瑞堂药业有限公司");
         let wrong_counts = warehouse_factory_counts(std::slice::from_ref(&wrong_factory));
-        assert!(
-            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts,)
-                .is_none()
-        );
+        let generic =
+            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts)
+                .expect("其他厂家应回退到唯一通用项目");
+        assert_eq!(generic.code, "00999");
+        assert_eq!(generic.confidence, "低");
     }
 
     #[test]
@@ -2633,7 +2778,7 @@ mod tests {
 
         assert_eq!(
             match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
-                .map(|(code, _)| code),
+                .map(|matched| matched.code),
             Some("00903".to_string())
         );
 
@@ -2644,10 +2789,11 @@ mod tests {
             "河北国瑞堂药业有限公司",
         );
         let wrong_counts = warehouse_factory_counts(std::slice::from_ref(&wrong_factory));
-        assert!(
-            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts,)
-                .is_none()
-        );
+        let generic =
+            match_external_inventory_key(&wrong_factory, &items, &factory_map, &wrong_counts)
+                .expect("其他厂家应回退到唯一通用项目");
+        assert_eq!(generic.code, "00902");
+        assert_eq!(generic.confidence, "低");
     }
 
     #[test]
@@ -2699,6 +2845,116 @@ mod tests {
 
         assert!(match_external_inventory_key(&first, &items, &factory_map, &counts).is_none());
         assert!(match_external_inventory_key(&second, &items, &factory_map, &counts).is_none());
+    }
+
+    #[test]
+    fn external_inventory_key_treats_shared_brand_as_name() {
+        let items = vec![inventory_item(
+            "00945",
+            "阿立哌唑口崩片（博思清）",
+            "10mg*40片/盒",
+        )];
+        let warehouse = warehouse_item(
+            "阿立哌唑口崩片（博思清）",
+            "10mg*40片/盒",
+            "片剂",
+            "成都康弘药业集团股份有限公司",
+        );
+        let counts = warehouse_factory_counts(std::slice::from_ref(&warehouse));
+        let matched = match_external_inventory_key(
+            &warehouse,
+            &items,
+            &get_merged_factory_abbr_map(None),
+            &counts,
+        )
+        .expect("商品名与规格一致时应能匹配");
+        assert_eq!(matched.code, "00945");
+        assert_eq!(matched.confidence, "中");
+    }
+
+    #[test]
+    fn external_inventory_key_matches_missing_spec_only_when_unique() {
+        let items = vec![inventory_item("00440", "艾叶", "")];
+        let warehouse = warehouse_item("艾叶", "1克*1000克/袋", "饮片", "河北国瑞堂药业有限公司");
+        let factory_map = get_merged_factory_abbr_map(None);
+        let counts = warehouse_factory_counts(std::slice::from_ref(&warehouse));
+        let matched = match_external_inventory_key(&warehouse, &items, &factory_map, &counts)
+            .expect("唯一同名品规可低可信度匹配空规格外账项目");
+        assert_eq!(matched.code, "00440");
+        assert_eq!(matched.confidence, "低");
+
+        let other_spec = warehouse_item("艾叶", "2克*500克/袋", "饮片", "河北国瑞堂药业有限公司");
+        let ambiguous_counts = warehouse_factory_counts(&[warehouse.clone(), other_spec]);
+        assert!(
+            match_external_inventory_key(&warehouse, &items, &factory_map, &ambiguous_counts)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn external_inventory_key_allocates_generic_to_only_uncovered_factory() {
+        let items = vec![
+            inventory_item("00865", "山萸肉", "1克*1000克/袋"),
+            inventory_item("01210", "山萸肉（蕴德）", "1克*1000克/袋"),
+        ];
+        let generic_warehouse =
+            warehouse_item("山萸肉", "1克*1000克/袋", "饮片", "河北国瑞堂药业有限公司");
+        let factory_warehouse =
+            warehouse_item("山萸肉", "1克*1000克/袋", "饮片", "河北蕴德药业有限公司");
+        let counts =
+            warehouse_factory_counts(&[generic_warehouse.clone(), factory_warehouse.clone()]);
+        let factory_map = get_merged_factory_abbr_map(None);
+
+        let generic =
+            match_external_inventory_key(&generic_warehouse, &items, &factory_map, &counts)
+                .expect("通用项目应留给没有厂家专属项目的唯一厂家");
+        assert_eq!(generic.code, "00865");
+        assert_eq!(generic.confidence, "低");
+
+        let specific =
+            match_external_inventory_key(&factory_warehouse, &items, &factory_map, &counts)
+                .expect("厂家专属项目仍优先");
+        assert_eq!(specific.code, "01210");
+        assert_eq!(specific.confidence, "高");
+    }
+
+    #[test]
+    fn external_audit_excel_includes_confidence_and_basis() {
+        let output = std::env::temp_dir().join(format!(
+            "external_audit_confidence_{}.xlsx",
+            std::process::id()
+        ));
+        let record = ExternalAuditRecord {
+            aux_code: "00945".to_string(),
+            name: "阿立哌唑口崩片（博思清）".to_string(),
+            spec: "10mg*40片/盒".to_string(),
+            factory: "成都康弘药业集团股份有限公司".to_string(),
+            ext_qty: 1219.0,
+            ext_price: 0.65,
+            ext_amount: 789.71,
+            wh_qty: 1219.0,
+            diff_qty: 0.0,
+            status: "完全吻合".to_string(),
+            match_confidence: "中".to_string(),
+            match_basis: "名称、规格一致；厂家未独立核验".to_string(),
+        };
+
+        export_external_audit_excel(&output, &[record]).expect("导出核对报告");
+        let (_, rows) = read_sheet_rows(&output, &[], "核对报告").expect("读取导出报告");
+        assert_eq!(
+            rows[2].get(11).map(cell_as_string).as_deref(),
+            Some("匹配可信度")
+        );
+        assert_eq!(
+            rows[2].get(12).map(cell_as_string).as_deref(),
+            Some("匹配依据")
+        );
+        assert_eq!(rows[3].get(11).map(cell_as_string).as_deref(), Some("中"));
+        assert_eq!(
+            rows[3].get(12).map(cell_as_string).as_deref(),
+            Some("名称、规格一致；厂家未独立核验")
+        );
+        std::fs::remove_file(output).expect("清理测试报告");
     }
 
     #[test]
