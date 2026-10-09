@@ -1210,7 +1210,7 @@
             <div class="panel-header">
               <div class="panel-title-group">
                 <h2 class="panel-title">外账出库凭证生成 (销售成本结转)</h2>
-                <p class="panel-desc">读取销售汇总表，对照《表格迁账参考模板.xlsx》【辅助信息】中的存货字典提取 5 位编码，借记 5401 主营业务成本，贷记 1405 库存商品明细。</p>
+                <p class="panel-desc">读取销售汇总表的销售数量，按辅助核算余额表的期末单价计算成本，再用外账模板中的存货编码生成 5401 借方和 1405 贷方分录。</p>
               </div>
             </div>
 
@@ -1246,8 +1246,19 @@
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>2. 外账参考模板 (表格迁账参考模板.xlsx)</span>
-                    <span class="label-tip">自动提取【辅助信息】中的 5 位存货编码与【辅助余额表】成本单价</span>
+                    <span>2. 辅助核算余额表（期末余额单价）</span>
+                    <span class="badge">必需</span>
+                  </label>
+                  <div class="file-input-wrapper">
+                    <input type="text" id="ext-outbound-balance-file" class="form-input" placeholder="请选择辅助核算余额表 .xls 或 .xlsx..." readonly />
+                    <button class="btn btn-secondary btn-file" id="btn-browse-ext-outbound-balance">选择文件</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">
+                    <span>3. 外账凭证模板 (表格迁账参考模板.xlsx)</span>
+                    <span class="label-tip">自动提取【辅助信息】中的 5 位存货编码</span>
                     <span class="badge">必需</span>
                   </label>
                   <div class="file-input-wrapper">
@@ -1258,7 +1269,7 @@
 
                 <div class="form-group">
                   <label class="form-label">
-                    <span>3. 目标输出文件路径</span>
+                    <span>4. 目标输出文件路径</span>
                     <span class="label-tip">保留原模板所有工作表，精准填制出库成本【凭证】Sheet</span>
                   </label>
                   <div class="file-input-wrapper">
@@ -1353,7 +1364,7 @@
                         <th>规格</th>
                         <th>生产厂家</th>
                         <th>销售数量</th>
-                        <th>进价金额</th>
+                        <th>期末单价计算成本</th>
                         <th style="text-align: center;">手工指定存货编码</th>
                       </tr>
                     </thead>

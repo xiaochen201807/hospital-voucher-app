@@ -762,12 +762,17 @@ function autoFillDetectedFiles(data) {
 
   // 外账出库凭证输入框
   const extOutSales = document.getElementById('ext-outbound-sales-file');
+  const extOutBalance = document.getElementById('ext-outbound-balance-file');
   const extOutTmpl = document.getElementById('ext-outbound-template-file');
   if (extOutSales && !extOutSales.value && salesFile) {
     setAutoFilledFile(extOutSales, salesFile.path);
   }
   if (extOutTmpl && !extOutTmpl.value && extTemplateCandidate) {
     setAutoFilledFile(extOutTmpl, extTemplateCandidate.path);
+  }
+  const extBalanceCandidate = findUniqueScannedFile(data.all_excel || [], file => file.name.includes('辅助核算余额表'));
+  if (extOutBalance && !extOutBalance.value && extBalanceCandidate) {
+    setAutoFilledFile(extOutBalance, extBalanceCandidate.path);
   }
 
   // 外账结存数比对输入框
@@ -856,7 +861,10 @@ function applyScannedFileToActiveTab(item) {
       showToast(`已填入入库单: ${name}`, 'info');
     }
   } else if (state.activeTab === 'tab-ext-outbound') {
-    if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
+    if (name.includes('辅助核算余额表')) {
+      setManuallySelectedFile(document.getElementById('ext-outbound-balance-file'), item.path);
+      showToast(`已填入辅助核算余额表: ${name}`, 'info');
+    } else if (name.includes('迁账') || name.includes('外账') || name.includes('模板')) {
       setManuallySelectedFile(document.getElementById('ext-outbound-template-file'), item.path);
       showToast(`已填入外账参考模板: ${name}`, 'info');
     } else {
@@ -1738,6 +1746,7 @@ function renderExtPreviewTable() {
 // ----------------------------------------------------
 function initTabExtOutbound() {
   const inSales = document.getElementById('ext-outbound-sales-file');
+  const inBalance = document.getElementById('ext-outbound-balance-file');
   const inTemplate = document.getElementById('ext-outbound-template-file');
   const inOutput = document.getElementById('ext-outbound-output-file');
   const inDate = document.getElementById('ext-outbound-date');
@@ -1746,9 +1755,11 @@ function initTabExtOutbound() {
   const btnManualRun = document.getElementById('btn-rerun-ext-outbound-manual');
 
   bindFilePicker('btn-browse-ext-outbound-sales', inSales, '选择销售明细汇总表');
+  bindFilePicker('btn-browse-ext-outbound-balance', inBalance, '选择辅助核算余额表');
   bindFilePicker('btn-browse-ext-outbound-template', inTemplate, '选择外账迁账参考模板');
 
   if (inSales) setupDropzone(inSales, inSales.closest('.file-input-wrapper'));
+  if (inBalance) setupDropzone(inBalance, inBalance.closest('.file-input-wrapper'));
   if (inTemplate) setupDropzone(inTemplate, inTemplate.closest('.file-input-wrapper'));
 
   // 默认日期设为当前月末最后一天
@@ -1760,18 +1771,21 @@ function initTabExtOutbound() {
 
   const generateExternalOutbound = async (confirmedItems, successMessage) => {
     const sales = inSales.value.trim();
+    const balance = inBalance.value.trim();
     const template = inTemplate.value.trim();
     const output = inOutput.value.trim() || '表格迁账参考模板_西药出库_已生成.xlsx';
     const dateVal = inDate.value.trim() || null;
     const voucherNo = inNo.value.trim() || '1';
 
     if (!sales) return showToast('请指定销售明细汇总表文件', 'warning');
+    if (!balance) return showToast('请指定辅助核算余额表文件', 'warning');
     if (!template) return showToast('请指定外账迁账参考模板', 'warning');
 
     resetManualSearchContext('extOutbound', template);
 
     const res = await invokeWithLoading('execute_external_outbound_voucher', {
       sales,
+      balance,
       template,
       output,
       date: dateVal,
@@ -1779,7 +1793,7 @@ function initTabExtOutbound() {
       confirmedItems: confirmedItems || null,
       config: null
     }, {
-      loadingMessage: '正在解析销售汇总、匹配外账5位存货编码并生成成本结转凭证...',
+      loadingMessage: '正在读取销售数量、期末余额单价并生成成本结转凭证...',
       errorPrefix: '生成外账出库凭证失败',
       errorDuration: 6000
     });

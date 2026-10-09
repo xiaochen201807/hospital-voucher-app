@@ -28,6 +28,7 @@ rust_xlsxwriter = "0.79"
 regex = "1.10"
 chrono = "0.4"
 zip = "8.6.0"
+quick-xml = "0.42"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

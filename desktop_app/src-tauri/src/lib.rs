@@ -341,6 +341,7 @@ fn execute_external_inbound_voucher(
 fn execute_external_outbound_voucher(
     app: tauri::AppHandle,
     sales: String,
+    balance: String,
     template: String,
     output: Option<String>,
     date: Option<String>,
@@ -351,6 +352,7 @@ fn execute_external_outbound_voucher(
     run_with_runtime_config(&app, config.as_deref(), |cfg| {
         core::external::generate_external_outbound_voucher(
             Path::new(&sales),
+            Path::new(&balance),
             Path::new(&template),
             output.as_deref().map(Path::new),
             date.as_deref(),
@@ -734,6 +736,9 @@ mod tests {
         // 2. 测试纯 Rust 外账出库
         let out_res = core::external::generate_external_outbound_voucher(
             Path::new(&sales_path),
+            Path::new(&project_file(
+                "辅助核算余额表_石家庄心理医院_2026年09月.xls",
+            )),
             Path::new(&tmpl_path),
             Some(&outbound_output),
             Some("2026-08-31"),
@@ -1056,6 +1061,9 @@ mod tests {
         let ext_sales_path = project_file("2026.8月西药销售表_已汇总.xlsx");
         let ext_outbound_res = core::external::generate_external_outbound_voucher(
             Path::new(&ext_sales_path),
+            Path::new(&project_file(
+                "辅助核算余额表_石家庄心理医院_2026年09月.xls",
+            )),
             Path::new(&ext_tmpl_path),
             Some(&ext_outbound_output),
             Some("2026-08-31"),
