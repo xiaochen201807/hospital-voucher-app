@@ -1,4 +1,5 @@
 use calamine::{open_workbook_auto, Data, Reader, Sheets};
+use quick_xml::{events::Event, Reader as XmlReader};
 use std::path::Path;
 
 /// 读取后的工作表数据。
@@ -100,6 +101,10 @@ pub fn read_sheet_rows(
     sheet_hints: &[&str],
     context: &str,
 ) -> Result<(String, SheetRows), String> {
+    if is_excel_xml_file(path) {
+        return read_excel_xml_sheet_rows(path, sheet_hints, context);
+    }
+
     let mut workbook = open_excel(path)?;
     let sheet_names = workbook.sheet_names();
     let sheet_name = select_sheet_name(&sheet_names, &[], sheet_hints, false)
@@ -123,6 +128,23 @@ pub fn read_sheet_rows_prefer(
     sheet_hints: &[&str],
     context: &str,
 ) -> Result<(String, SheetRows), String> {
+    if is_excel_xml_file(path) {
+        let sheets = read_excel_xml_sheets(path, context)?;
+        let sheet_names = sheets
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let sheet_name = select_sheet_name(&sheet_names, exact_sheet_hints, sheet_hints, true)
+            .or_else(|| sheet_names.last().cloned())
+            .ok_or_else(|| format!("{}中无有效工作表", context))?;
+        let rows = sheets
+            .into_iter()
+            .find(|(name, _)| name == &sheet_name)
+            .map(|(_, rows)| rows)
+            .ok_or_else(|| format!("{}中无有效工作表", context))?;
+        return Ok((sheet_name, rows));
+    }
+
     let mut workbook = open_excel(path)?;
     let sheet_names = workbook.sheet_names();
     let sheet_name = select_sheet_name(&sheet_names, exact_sheet_hints, sheet_hints, true)
@@ -237,53 +259,243 @@ pub fn collect_source_dates(
         .collect()
 }
 
-/// 打开任意 Excel 文件 (.xlsx 或 .xls)
+const OLE_COMPOUND_FILE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
+fn file_prefix(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 512];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+fn is_zip_file(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"PK\x03\x04")
+        || prefix.starts_with(b"PK\x05\x06")
+        || prefix.starts_with(b"PK\x07\x08")
+}
+
+fn is_excel_xml_prefix(prefix: &[u8]) -> bool {
+    let sample = String::from_utf8_lossy(prefix)
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .to_lowercase();
+    (sample.starts_with("<?xml") || sample.starts_with("<workbook"))
+        && sample.contains("<workbook")
+        && sample.contains("schemas-microsoft-com:office:spreadsheet")
+}
+
+fn is_html_or_generic_xml_prefix(prefix: &[u8]) -> bool {
+    let sample = String::from_utf8_lossy(prefix).to_lowercase();
+    sample.contains("<html")
+        || sample.contains("<table")
+        || sample.contains("<?xml")
+        || sample.contains("xmlns:")
+}
+
+fn is_excel_xml_file(path: &Path) -> bool {
+    file_prefix(path)
+        .map(|prefix| is_excel_xml_prefix(&prefix))
+        .unwrap_or(false)
+}
+
+fn xml_import_error(context: &str, error: impl std::fmt::Display) -> String {
+    format!("解析{} Excel 2003 XML 表格失败: {}", context, error)
+}
+
+/// 读取 Excel 2003 XML（许多医院系统会将它导出为 `.xls`）中的全部工作表。
+///
+/// 这类文件使用 `ss:Index` 表示稀疏单元格列号，单元格值统一读取为字符串，后续
+/// 的表头匹配和数值转换会沿用标准 Excel 读取路径。
+fn read_excel_xml_sheets(path: &Path, context: &str) -> Result<Vec<(String, SheetRows)>, String> {
+    let xml = std::fs::read_to_string(path).map_err(|e| xml_import_error(context, e))?;
+    let mut reader = XmlReader::from_str(&xml);
+    reader.config_mut().trim_text(true);
+
+    let mut sheets: Vec<(String, SheetRows)> = Vec::new();
+    let mut current_sheet: Option<usize> = None;
+    let mut current_row: Option<Vec<Data>> = None;
+    let mut current_column = 0usize;
+    let mut current_cell_column: Option<usize> = None;
+    let mut in_cell_data = false;
+    let mut cell_value = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) if event.local_name().as_ref() == "Worksheet" => {
+                let name = event
+                    .attributes()
+                    .flatten()
+                    .find(|attribute| attribute.key.local_name().as_ref() == "Name")
+                    .map(|attribute| attribute.value.as_ref().trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| format!("Sheet{}", sheets.len() + 1));
+                sheets.push((name, Vec::new()));
+                current_sheet = Some(sheets.len() - 1);
+            }
+            Ok(Event::Start(event))
+                if current_sheet.is_some() && event.local_name().as_ref() == "Row" =>
+            {
+                current_row = Some(Vec::new());
+                current_column = 0;
+            }
+            Ok(Event::Start(event))
+                if current_row.is_some() && event.local_name().as_ref() == "Cell" =>
+            {
+                current_column += 1;
+                for attribute in event.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == "Index" {
+                        current_column = attribute
+                            .value
+                            .as_ref()
+                            .parse::<usize>()
+                            .map_err(|_| xml_import_error(context, "存在无效的单元格列号"))?;
+                    }
+                }
+                if current_column == 0 || current_column > 10000 {
+                    return Err(xml_import_error(context, "存在无效的单元格列号"));
+                }
+                if let Some(row) = current_row.as_mut() {
+                    row.resize(row.len().max(current_column), Data::Empty);
+                }
+                current_cell_column = Some(current_column);
+            }
+            Ok(Event::Start(event))
+                if current_cell_column.is_some() && event.local_name().as_ref() == "Data" =>
+            {
+                in_cell_data = true;
+                cell_value.clear();
+            }
+            Ok(Event::Empty(event))
+                if current_row.is_some() && event.local_name().as_ref() == "Cell" =>
+            {
+                current_column += 1;
+                for attribute in event.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == "Index" {
+                        current_column = attribute
+                            .value
+                            .as_ref()
+                            .parse::<usize>()
+                            .map_err(|_| xml_import_error(context, "存在无效的单元格列号"))?;
+                    }
+                }
+                if current_column == 0 || current_column > 10000 {
+                    return Err(xml_import_error(context, "存在无效的单元格列号"));
+                }
+                if let Some(row) = current_row.as_mut() {
+                    row.resize(row.len().max(current_column), Data::Empty);
+                }
+            }
+            Ok(Event::Empty(event))
+                if current_cell_column.is_some() && event.local_name().as_ref() == "Data" =>
+            {
+                if let (Some(row), Some(column)) = (current_row.as_mut(), current_cell_column) {
+                    row[column - 1] = Data::String(String::new());
+                }
+            }
+            Ok(Event::Text(event)) if in_cell_data => {
+                let value = quick_xml::escape::unescape(event.as_ref())
+                    .map_err(|e| xml_import_error(context, e))?;
+                cell_value.push_str(&value);
+            }
+            Ok(Event::CData(event)) if in_cell_data => {
+                cell_value.push_str(event.as_ref());
+            }
+            Ok(Event::End(event)) if event.local_name().as_ref() == "Data" => {
+                if in_cell_data {
+                    if let (Some(row), Some(column)) = (current_row.as_mut(), current_cell_column) {
+                        row[column - 1] = Data::String(cell_value.trim().to_string());
+                    }
+                    in_cell_data = false;
+                }
+            }
+            Ok(Event::End(event)) if event.local_name().as_ref() == "Cell" => {
+                current_cell_column = None;
+            }
+            Ok(Event::End(event)) if event.local_name().as_ref() == "Row" => {
+                if let (Some(sheet), Some(row)) = (current_sheet, current_row.take()) {
+                    sheets[sheet].1.push(row);
+                }
+            }
+            Ok(Event::End(event)) if event.local_name().as_ref() == "Worksheet" => {
+                current_sheet = None;
+                current_row = None;
+                current_cell_column = None;
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(xml_import_error(context, error)),
+            _ => {}
+        }
+    }
+
+    Ok(sheets)
+}
+
+fn read_excel_xml_sheet_rows(
+    path: &Path,
+    sheet_hints: &[&str],
+    context: &str,
+) -> Result<(String, SheetRows), String> {
+    let sheets = read_excel_xml_sheets(path, context)?;
+    let sheet_names = sheets
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let sheet_name = select_sheet_name(&sheet_names, &[], sheet_hints, false)
+        .or_else(|| sheet_names.first().cloned())
+        .ok_or_else(|| format!("{}中无有效工作表", context))?;
+    let rows = sheets
+        .into_iter()
+        .find(|(name, _)| name == &sheet_name)
+        .map(|(_, rows)| rows)
+        .ok_or_else(|| format!("{}中无有效工作表", context))?;
+    Ok((sheet_name, rows))
+}
+
+/// 打开任意 Excel 文件（`.xlsx` 或 `.xls`），优先依据文件内容识别格式。
 pub fn open_excel(path: &Path) -> Result<Sheets<std::io::BufReader<std::fs::File>>, String> {
+    let prefix = file_prefix(path).ok();
+
+    // calamine 的 open_workbook_auto 只依据扩展名。先按标准文件签名处理，兼容
+    // “真实格式与扩展名不一致”的 WPS/医院系统导出文件。
+    if let Some(prefix) = prefix.as_deref() {
+        if is_zip_file(prefix) {
+            return calamine::open_workbook::<calamine::Xlsx<_>, _>(path)
+                .map(Sheets::Xlsx)
+                .map_err(|error| format!("XLSX 文件解析失败: {}", error));
+        }
+        if prefix.starts_with(OLE_COMPOUND_FILE_MAGIC) {
+            return calamine::open_workbook::<calamine::Xls<_>, _>(path)
+                .map(Sheets::Xls)
+                .map_err(|error| format!("XLS 文件解析失败: {}", error));
+        }
+        if is_excel_xml_prefix(prefix) {
+            return Err(
+                "该文件是 Excel 2003 XML 表格（扩展名通常为 .xls），请通过表格导入功能读取，或用 WPS/Excel 另存为标准 .xlsx 后再打开。"
+                    .to_string(),
+            );
+        }
+        if prefix.is_empty() {
+            return Err("文件大小为 0 字节（空文件），请检查导出是否完整。".to_string());
+        }
+    }
+
     match open_workbook_auto(path) {
         Ok(sheets) => Ok(sheets),
-        Err(e) => {
-            use std::io::Read;
-            // 尝试读取前 512 字节探测真实文件类型
-            if let Ok(mut file) = std::fs::File::open(path) {
-                let mut buf = vec![0u8; 512];
-                let n = file.read(&mut buf).unwrap_or(0);
-                buf.truncate(n);
-
-                // 1. 如果是 PK.. (ZIP / XLSX)，尝试以 Xlsx 打开
-                if buf.starts_with(b"PK\x03\x04") {
-                    if let Ok(xlsx) = calamine::open_workbook::<calamine::Xlsx<_>, _>(path) {
-                        return Ok(Sheets::Xlsx(xlsx));
-                    }
-                }
-
-                // 2. 如果是 OLE 复合文档头，尝试以 Xls 打开
-                if buf.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
-                    if let Ok(xls) = calamine::open_workbook::<calamine::Xls<_>, _>(path) {
-                        return Ok(Sheets::Xls(xls));
-                    }
-                }
-
-                // 3. 如果是 HTML 或 XML 伪 Excel 表格
-                let sample_str = String::from_utf8_lossy(&buf).to_lowercase();
-                if sample_str.contains("<html")
-                    || sample_str.contains("<table")
-                    || sample_str.contains("<?xml")
-                    || sample_str.contains("xmlns:")
-                {
+        Err(error) => {
+            if let Some(prefix) = prefix.as_deref() {
+                if is_html_or_generic_xml_prefix(prefix) {
                     return Err(
-                        "该文件疑似为医院/库管系统导出的 HTML/XML 网页伪表格（非标准 Excel 二进制文件）。\n\n【解决方法】：请先用 WPS 或 Microsoft Excel 打开该报表，点击【文件】->【另存为】，格式选择【Excel 工作簿 (*.xlsx)】保存后再重新导入！"
+                        "该文件疑似为医院/库管系统导出的 HTML/XML 网页伪表格（非标准 Excel 文件）。\n\n【解决方法】：请先用 WPS 或 Microsoft Excel 打开该报表，点击【文件】->【另存为】，格式选择【Excel 工作簿 (*.xlsx)】保存后再重新导入！"
                             .to_string(),
                     );
                 }
-
-                if n == 0 {
-                    return Err("文件大小为 0 字节（空文件），请检查导出是否完整。".to_string());
-                }
             }
-
             Err(format!(
-                "打开 Excel 文件失败: {}\n\n【排查建议】：如果该报表由医院系统导出，请先用 WPS 或 Excel 打开并【另存为】标准的【.xlsx】格式后再导入使用。",
-                e
+                "打开 Excel 文件失败: {}\n\n【排查建议】：请确认文件是标准的 .xls 或 .xlsx；如果报表由医院系统导出，请先用 WPS 或 Excel 打开并另存为标准 Excel 工作簿后再导入。",
+                error
             ))
         }
     }
@@ -292,6 +504,7 @@ pub fn open_excel(path: &Path) -> Result<Sheets<std::io::BufReader<std::fs::File
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_xlsxwriter::Workbook;
 
     #[test]
     fn exact_header_match_beats_broad_contains_match() {
@@ -358,5 +571,58 @@ mod tests {
 
         assert_eq!(find_exact_col_idx(&header, &["进价"]), None);
         assert_eq!(find_exact_col_idx(&header, &["进价金额"]), Some(1));
+    }
+
+    #[test]
+    fn xlsx_content_is_opened_even_when_extension_is_xls() {
+        let path = std::env::temp_dir().join(format!(
+            "excel_signature_{}_{}.xls",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("销售明细").unwrap();
+        worksheet.write_string(0, 0, "药品名称").unwrap();
+        worksheet.write_string(1, 0, "测试药品").unwrap();
+        workbook.save(&path).unwrap();
+
+        let mut opened = open_excel(&path).unwrap();
+        assert_eq!(opened.sheet_names(), vec!["销售明细".to_string()]);
+        let range = opened.worksheet_range("销售明细").unwrap();
+        assert_eq!(cell_as_string(&range.get((1, 0)).unwrap()), "测试药品");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn excel_2003_xml_xls_is_read_by_common_sheet_loader() {
+        let path = std::env::temp_dir().join(format!(
+            "excel_xml_{}_{}.xls",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Workbook xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Worksheet ss:Name="库存明细"><Table>
+    <Row><Cell><Data ss:Type="String">名称</Data></Cell><Cell><Data ss:Type="String">数量</Data></Cell></Row>
+    <Row><Cell><Data ss:Type="String">测试药品</Data></Cell><Cell ss:Index="2"><Data ss:Type="Number">3</Data></Cell></Row>
+  </Table></Worksheet>
+</Workbook>"#;
+        std::fs::write(&path, xml).unwrap();
+
+        let (sheet, rows) = read_sheet_rows(&path, &["库存"], "库存报表").unwrap();
+        assert_eq!(sheet, "库存明细");
+        assert_eq!(cell_as_string(&rows[0][0]), "名称");
+        assert_eq!(cell_as_string(&rows[1][1]), "3");
+        assert_eq!(cell_as_f64(&rows[1][1]), 3.0);
+
+        std::fs::remove_file(path).unwrap();
     }
 }
