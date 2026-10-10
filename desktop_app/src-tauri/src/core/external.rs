@@ -1807,6 +1807,8 @@ pub fn generate_external_outbound_voucher(
     let mut col_spec = None;
     let mut col_factory = None;
     let mut col_qty = None;
+    let mut col_price = None;
+    let mut col_amt = None;
 
     for (r_idx, row) in rows.iter().enumerate().take(10) {
         for (c_idx, cell) in row.iter().enumerate() {
@@ -1820,6 +1822,10 @@ pub fn generate_external_outbound_voucher(
                 col_factory = Some(c_idx);
             } else if s.contains("实发数量") || s.contains("销售数量") || s == "数量" {
                 col_qty = Some(c_idx);
+            } else if s.contains("成本进价") || s.contains("进价单价") || s == "进价" {
+                col_price = Some(c_idx);
+            } else if s.contains("进价金额") || s.contains("成本金额") {
+                col_amt = Some(c_idx);
             }
         }
         if col_name.is_some() && col_qty.is_some() {
@@ -1837,6 +1843,7 @@ pub fn generate_external_outbound_voucher(
         spec: String,
         factory: String,
         qty: f64,
+        fallback_amount: f64,
     }
 
     let mut raw_items: Vec<RawSaleItem> = Vec::new();
@@ -1867,6 +1874,15 @@ pub fn generate_external_outbound_voucher(
             .trim()
             .to_string();
         let qty = row.get(col_qty).map(cell_as_f64).unwrap_or(0.0);
+        let sales_price = col_price
+            .and_then(|c| row.get(c))
+            .map(cell_as_f64)
+            .unwrap_or(0.0);
+        let fallback_amount = col_amt
+            .and_then(|c| row.get(c))
+            .map(cell_as_f64)
+            .filter(|amount| *amount > 0.0)
+            .unwrap_or(qty * sales_price);
 
         let key = (
             normalize_text(&name),
@@ -1875,6 +1891,8 @@ pub fn generate_external_outbound_voucher(
         );
         if let Some(&idx) = group_map.get(&key) {
             raw_items[idx].qty += qty;
+            raw_items[idx].fallback_amount =
+                ((raw_items[idx].fallback_amount + fallback_amount) * 100.0).round() / 100.0;
         } else {
             let idx = raw_items.len();
             raw_items.push(RawSaleItem {
@@ -1883,6 +1901,7 @@ pub fn generate_external_outbound_voucher(
                 spec,
                 factory,
                 qty,
+                fallback_amount: (fallback_amount * 100.0).round() / 100.0,
             });
             group_map.insert(key, idx);
         }
@@ -1894,7 +1913,6 @@ pub fn generate_external_outbound_voucher(
     let mut voucher_rows = Vec::new();
     let mut unmatched_drugs = Vec::new();
     let mut total_credit_cents: i64 = 0;
-    let mut missing_prices = Vec::new();
 
     let mut credit_rows = Vec::new();
     for item in &raw_items {
@@ -1912,30 +1930,48 @@ pub fn generate_external_outbound_voucher(
                 &factory_abbr,
             )
         });
-        let (aux_code, aux_name, is_unmatched) = match matched {
-            Some((code, name)) => (code, name, false),
-            None => (String::new(), item.name.clone(), true),
+        let (matched_code, matched_name) = match matched {
+            Some((code, name)) => (code, name),
+            None => (String::new(), item.name.clone()),
         };
-        let price_code = if is_unmatched {
-            match_external_inventory_code(
-                &item.name,
-                &item.spec,
-                &item.factory,
-                &closing_balances.inventory_items,
-                &factory_abbr,
-            )
-            .map(|(code, _)| code)
-        } else {
-            Some(aux_code.clone())
-        };
+        let balance_match = match_external_inventory_code(
+            &item.name,
+            &item.spec,
+            &item.factory,
+            &closing_balances.inventory_items,
+            &factory_abbr,
+        )
+        .map(|(code, _)| code);
+        let price_code = [
+            (!matched_code.is_empty()).then_some(matched_code.clone()),
+            balance_match,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|code| {
+            closing_balances
+                .prices
+                .get(code)
+                .is_some_and(|price| price.is_finite() && *price > 0.0)
+        });
         let cost_amount = price_code
             .as_ref()
             .and_then(|code| closing_balances.prices.get(code))
             .filter(|price| price.is_finite() && **price > 0.0)
             .map(|price| (item.qty * price * 100.0).round() / 100.0);
-        let Some(cost_amount) = cost_amount else {
-            missing_prices.push(format!("{}（{}，{}）", item.name, item.spec, aux_code));
-            continue;
+        let has_closing_price = cost_amount.is_some();
+        let cost_amount = cost_amount.unwrap_or(item.fallback_amount);
+        // 编码或期末单价任一项无法确定时，保留分录并进入现有的手工模糊匹配区。
+        let is_unmatched = matched_code.is_empty() || !has_closing_price;
+        let aux_code = if is_unmatched {
+            String::new()
+        } else {
+            matched_code.clone()
+        };
+        let aux_name = if is_unmatched {
+            item.name.clone()
+        } else {
+            matched_name.clone()
         };
 
         if is_unmatched {
@@ -1981,20 +2017,6 @@ pub fn generate_external_outbound_voucher(
             is_credit: true,
             is_unmatched,
         });
-    }
-
-    if !missing_prices.is_empty() {
-        return Err(format!(
-            "{} 项销售药品在辅助核算余额表中没有可确定的期末余额单价，未生成凭证：{}{}",
-            missing_prices.len(),
-            missing_prices
-                .iter()
-                .take(8)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("、"),
-            if missing_prices.len() > 8 { "等" } else { "" }
-        ));
     }
 
     let total_cost = (total_credit_cents as f64) / 100.0;
@@ -2890,6 +2912,10 @@ mod tests {
         sheet.write_string(1, 1, "10mg").unwrap();
         sheet.write_number(1, 2, 840.0).unwrap();
         sheet.write_number(1, 3, 9999.0).unwrap();
+        sheet.write_string(2, 0, "未知药品").unwrap();
+        sheet.write_string(2, 1, "20mg").unwrap();
+        sheet.write_number(2, 2, 2.0).unwrap();
+        sheet.write_number(2, 3, 14.0).unwrap();
         sales.save(&sales_path).unwrap();
 
         let balance_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2897,7 +2923,7 @@ mod tests {
 <Row><Cell><Data>编号</Data></Cell><Cell><Data>名称</Data></Cell><Cell><Data>规格型号</Data></Cell><Cell><Data>期末余额</Data></Cell></Row>
 <Row><Cell ss:Index="16"><Data>数量</Data></Cell><Cell><Data>单价</Data></Cell><Cell><Data>金额</Data></Cell></Row>
 <Row><Cell><Data>00004</Data></Cell><Cell><Data>盐酸贝那普利片</Data></Cell><Cell><Data>10mg</Data></Cell><Cell ss:Index="17"><Data>0.3072</Data></Cell></Row>
-<Row><Cell><Data>00005</Data></Cell><Cell><Data>未销售的存货</Data></Cell><Cell ss:Index="17"><Data></Data></Cell></Row>
+<Row><Cell><Data>00005</Data></Cell><Cell><Data>余额别名</Data></Cell><Cell><Data>20mg</Data></Cell><Cell ss:Index="17"><Data>2.5</Data></Cell></Row>
 </Table></Worksheet></Workbook>"#;
         std::fs::write(&balance_path, balance_xml).unwrap();
 
@@ -2915,6 +2941,9 @@ mod tests {
             .enumerate()
         {
             info.write_string(1, col as u16, *value).unwrap();
+        }
+        for (col, value) in ["存货", "00005", "规范药品", "20mg"].iter().enumerate() {
+            info.write_string(2, col as u16, *value).unwrap();
         }
         let voucher = template.add_worksheet();
         voucher.set_name("凭证").unwrap();
@@ -2937,15 +2966,39 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(result.total_items, 1);
-        assert_eq!(result.total_credit, 258.05);
-        assert_eq!(result.total_debit, 258.05);
+        assert_eq!(result.total_items, 2);
+        assert_eq!(result.total_credit, 272.05);
+        assert_eq!(result.total_debit, 272.05);
         assert_eq!(result.voucher_rows[1].qty, Some(840.0));
         assert_eq!(result.voucher_rows[1].aux_code, "00004");
+        assert_eq!(result.unmatched_count, 1);
+        assert_eq!(result.voucher_rows[2].qty, Some(2.0));
+        assert!(result.voucher_rows[2].aux_code.is_empty());
+        assert_eq!(result.voucher_rows[2].credit_amount, Some(14.0));
         let mut output = open_excel(&output_path).unwrap();
         let rows = output.worksheet_range("凭证").unwrap();
-        assert_eq!(cell_as_f64(rows.get_value((3, 6)).unwrap()), 258.05);
+        assert_eq!(cell_as_f64(rows.get_value((3, 6)).unwrap()), 272.05);
         assert_eq!(cell_as_f64(rows.get_value((4, 7)).unwrap()), 258.05);
+        assert_eq!(cell_as_f64(rows.get_value((5, 7)).unwrap()), 14.0);
+
+        let rerun = generate_external_outbound_voucher(
+            &sales_path,
+            &balance_path,
+            &template_path,
+            Some(&output_path),
+            Some("2026-09-30"),
+            Some("1"),
+            None,
+            Some(&[ConfirmedExternalInventoryMapping {
+                row_index: 3,
+                aux_code: "00005".to_string(),
+            }]),
+        )
+        .unwrap();
+        assert_eq!(rerun.unmatched_count, 0);
+        assert_eq!(rerun.total_credit, 263.05);
+        assert_eq!(rerun.voucher_rows[2].aux_code, "00005");
+        assert_eq!(rerun.voucher_rows[2].credit_amount, Some(5.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
